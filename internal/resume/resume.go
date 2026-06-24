@@ -5,10 +5,11 @@
 //     into the dir that encodes back to the mission's project folder (see
 //     internal/pathenc).
 //   - account: each account is its own CLAUDE_CONFIG_DIR (per-account dir with
-//     its /login). Resume launches under a logged-in account's config dir,
-//     preferring the least-recently-used; the shared projects/ link means any
-//     account can resume any session. With no Houston accounts, it falls back to
-//     the config dir that physically holds the transcript.
+//     its /login). The shared projects/ link means any logged-in account can
+//     resume any session, so resume balances: it launches under the
+//     least-recently-used logged-in account, exactly like `houston run`. Only
+//     when there are no logged-in Houston accounts does it fall back to the
+//     config dir that physically holds the transcript.
 package resume
 
 import (
@@ -35,38 +36,27 @@ func Command(m model.Mission) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("cwd no existe: %s", dir)
 	}
 
-	// Resume under the config dir that physically holds the transcript when it
-	// carries its own login — legacy/claudeswap stores and per-account dirs do.
-	// Only when that dir has no credentials (e.g. the bare shared store) fall back
-	// to a logged-in Houston account dir, which links to the same store and has a
-	// login. No token injection: identity comes from the dir's own login.
+	// Balance the resume across accounts: the shared projects/ link lets any
+	// logged-in account reopen any session, so prefer the least-recently-used
+	// logged-in Houston account, just like `houston run`. Fall back to the config
+	// dir that physically holds the transcript only when no Houston account is
+	// logged in. No token injection: identity comes from the dir's own login.
 	configDir := configDirOf(m.Path)
-	if !hasCredentials(configDir) {
-		if accs, _ := accounts.Load(); len(accs) > 0 {
-			var loggedIn []accounts.Account
-			for _, a := range accs {
-				if a.LoggedIn() {
-					loggedIn = append(loggedIn, a)
-				}
+	if accs, _ := accounts.Load(); len(accs) > 0 {
+		var loggedIn []accounts.Account
+		for _, a := range accs {
+			if a.LoggedIn() {
+				loggedIn = append(loggedIn, a)
 			}
-			if acc, ok := usage.PickLRU(loggedIn); ok {
-				if cd := acc.ResolveConfigDir(); cd != "" {
-					configDir = cd
-				}
-				accounts.TouchUse(acc.ID, accounts.Now())
+		}
+		if acc, ok := usage.PickLRU(loggedIn); ok {
+			if cd := acc.ResolveConfigDir(); cd != "" {
+				configDir = cd
 			}
+			accounts.TouchUse(acc.ID, accounts.Now())
 		}
 	}
 	return launch.Cmd(configDir, []string{"--resume", m.ID}, dir), nil
-}
-
-// hasCredentials reports whether a config dir carries its own login.
-func hasCredentials(dir string) bool {
-	if dir == "" {
-		return false
-	}
-	_, err := os.Stat(filepath.Join(dir, ".credentials.json"))
-	return err == nil
 }
 
 // configDirOf returns the Claude config dir containing a transcript, i.e. the
