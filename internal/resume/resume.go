@@ -6,10 +6,11 @@
 //     internal/pathenc).
 //   - account: each account is its own CLAUDE_CONFIG_DIR (per-account dir with
 //     its /login). The shared projects/ link means any logged-in account can
-//     resume any session, so resume balances: it launches under the
-//     least-recently-used logged-in account, exactly like `houston run`. Only
-//     when there are no logged-in Houston accounts does it fall back to the
-//     config dir that physically holds the transcript.
+//     resume any session, so resume balances across accounts exactly like
+//     `houston run`: it probes quota and picks the lowest-pressure logged-in
+//     account (falling back to least-recently-used if the probe fails). Only
+//     when no Houston account is logged in does it fall back to the config dir
+//     that physically holds the transcript.
 package resume
 
 import (
@@ -18,12 +19,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"houston/internal/accounts"
 	"houston/internal/launch"
 	"houston/internal/model"
 	"houston/internal/usage"
 )
+
+// probeTimeout caps how long resume waits on the usage probe before launching.
+const probeTimeout = 8 * time.Second
 
 // Command builds the *exec.Cmd that resumes the mission. Run it via bubbletea's
 // tea.ExecProcess so the TUI suspends and hands the terminal to claude.
@@ -36,11 +41,13 @@ func Command(m model.Mission) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("cwd no existe: %s", dir)
 	}
 
-	// Balance the resume across accounts: the shared projects/ link lets any
-	// logged-in account reopen any session, so prefer the least-recently-used
-	// logged-in Houston account, just like `houston run`. Fall back to the config
-	// dir that physically holds the transcript only when no Houston account is
-	// logged in. No token injection: identity comes from the dir's own login.
+	// Balance the resume across accounts, exactly like `houston run`: the shared
+	// projects/ link lets any logged-in account reopen any session, so we probe
+	// quota and pick the lowest-pressure logged-in account (usage.Best, which
+	// degrades to least-recently-used if probing fails). Everything balances
+	// unless the user forces an account elsewhere. Fall back to the config dir
+	// that physically holds the transcript only when no Houston account is logged
+	// in. No token injection: identity comes from the dir's own login.
 	configDir := configDirOf(m.Path)
 	if accs, _ := accounts.Load(); len(accs) > 0 {
 		var loggedIn []accounts.Account
@@ -49,11 +56,11 @@ func Command(m model.Mission) (*exec.Cmd, error) {
 				loggedIn = append(loggedIn, a)
 			}
 		}
-		if acc, ok := usage.PickLRU(loggedIn); ok {
-			if cd := acc.ResolveConfigDir(); cd != "" {
+		if best, _, err := usage.Best(loggedIn, probeTimeout); err == nil {
+			if cd := best.ResolveConfigDir(); cd != "" {
 				configDir = cd
 			}
-			accounts.TouchUse(acc.ID, accounts.Now())
+			accounts.TouchUse(best.ID, accounts.Now())
 		}
 	}
 	return launch.Cmd(configDir, []string{"--resume", m.ID}, dir), nil

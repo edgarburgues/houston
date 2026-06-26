@@ -50,8 +50,15 @@ func ProjectRoots() []string {
 	return roots
 }
 
-// ScanAll scans every project root and dedupes missions that resolve to the
-// same physical file (accounts linked to a shared store point at one inode).
+// ScanAll scans every project root and dedupes missions that are really the
+// same session reached through different roots (the shared store plus each
+// account dir junctioned to it).
+//
+// Dedup is by logical identity (project dir name + session id), NOT by resolved
+// path: on Windows, filepath.EvalSymlinks does not traverse directory junctions
+// (it returns "" for a path through one), so a path-based key would leave the
+// same transcript duplicated once per account. The same physical file always has
+// the same project+id under every root, so Key() collapses them reliably.
 func ScanAll() ([]model.Mission, error) {
 	roots := ProjectRoots()
 	if len(roots) == 0 {
@@ -65,7 +72,7 @@ func ScanAll() ([]model.Mission, error) {
 			continue
 		}
 		for _, m := range ms {
-			key := resolvePath(m.Path)
+			key := m.Key()
 			if seen[key] {
 				continue
 			}
@@ -75,13 +82,4 @@ func ScanAll() ([]model.Mission, error) {
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].LastTime.After(all[j].LastTime) })
 	return all, nil
-}
-
-// resolvePath resolves junctions/symlinks so links to a shared store collapse
-// to one key. Falls back to a cleaned path if resolution fails.
-func resolvePath(p string) string {
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r
-	}
-	return filepath.Clean(p)
 }

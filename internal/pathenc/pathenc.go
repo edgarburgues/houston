@@ -34,6 +34,10 @@ func isDir(p string) bool {
 // boundaries are ambiguous (a real folder may contain '-'), so we walk the
 // filesystem greedily, preferring the longest token run that names an existing
 // directory at each level. Returns "" if it can't get started.
+//
+// Windows-only: it keys off the "--" that a drive root ("C:\" -> "C--") leaves
+// in the encoded name. POSIX roots encode "/Users" -> "-Users" (no "--"), so
+// this returns "" there and ResolveResumeDir falls back to the stored cwd.
 func DecodeProjectDir(proj string) string {
 	i := strings.Index(proj, "--")
 	if i < 0 {

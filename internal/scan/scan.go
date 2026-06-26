@@ -31,7 +31,13 @@ type rawEntry struct {
 	GitBranch  string      `json:"gitBranch"`
 	Version    string      `json:"version"`
 	Slug       string      `json:"slug"`
-	Timestamp  string      `json:"timestamp"`
+	// User-set session name (claude -n / /rename), if the transcript records one.
+	// The spelling has varied across Claude Code versions; accept both. A
+	// top-level "name" is deliberately NOT read — it's ambiguous with tool/other
+	// names. Any non-empty value here wins as the mission's display title.
+	SessionName string `json:"sessionName"`
+	CustomName  string `json:"customName"`
+	Timestamp   string `json:"timestamp"`
 	IsMeta     bool        `json:"isMeta"`
 	AiTitle    string      `json:"aiTitle"`
 	LastPrompt string      `json:"lastPrompt"`
@@ -122,6 +128,9 @@ func parseFile(path string) (model.Mission, error) {
 	if m.Title == "" {
 		m.Title = firstLine(m.FirstPrompt)
 	}
+	if m.Name != "" { // an explicit user-set name wins over aiTitle/first prompt
+		m.Title = m.Name
+	}
 	// m.Cwd currently holds the creation cwd; resolve the dir that actually
 	// encodes back to the project folder so `claude --resume` finds the session.
 	m.Cwd = pathenc.ResolveResumeDir(m.Cwd, m.LastCwd, m.Project)
@@ -149,6 +158,11 @@ func ingest(m *model.Mission, sb *strings.Builder, line string) {
 	}
 	if e.Slug != "" {
 		m.Slug = e.Slug
+	}
+	if e.SessionName != "" {
+		m.Name = e.SessionName
+	} else if e.CustomName != "" {
+		m.Name = e.CustomName
 	}
 	switch e.Type {
 	case "ai-title":

@@ -811,7 +811,9 @@ func safeName(title, id string) string {
 	if len(s) > 50 {
 		s = s[:50]
 	}
-	return s + "-" + id[:8]
+	// shortID, not id[:8]: ids aren't guaranteed 36-char UUIDs (a legacy/hand-copied
+	// "ab.jsonl" gives a 2-char id), and a raw slice would panic on export.
+	return s + "-" + shortID(id, 8)
 }
 
 func (m Model) viewAccounts() string {

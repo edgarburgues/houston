@@ -13,7 +13,8 @@ type Mission struct {
 	Project       string         `json:"project"`   // encoded project dir name
 	Cwd           string         `json:"cwd"`       // dir to cd into for `claude --resume` (encodes to Project)
 	LastCwd       string         `json:"lastCwd"`   // cwd of the last message (where work happened)
-	Title         string         `json:"title"`     // aiTitle
+	Title         string         `json:"title"`     // display title: explicit Name, else aiTitle, else first prompt
+	Name          string         `json:"name"`      // user-set session name (claude -n / /rename), if present
 	Slug          string         `json:"slug"`      // human slug (starry-tinkering-sky)
 	GitBranch     string         `json:"gitBranch"`
 	Version       string         `json:"version"`

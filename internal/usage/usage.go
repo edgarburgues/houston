@@ -29,8 +29,8 @@ const (
 // Probe is the result of querying one account's usage.
 type Probe struct {
 	Account  accounts.Account
-	U5       float64   // 5-hour utilization (0..1)
-	U7       float64   // 7-day utilization
+	U5       float64   // 5-hour utilization in percent (0..100, as the endpoint reports)
+	U7       float64   // 7-day utilization in percent (0..100)
 	Reset5   time.Time // when the 5h window resets (zero if unknown)
 	Reset7   time.Time // when the 7d window resets (zero if unknown)
 	Pressure float64   // time-weighted blend of U5/U7 (see weightedPressure)
@@ -101,17 +101,35 @@ func remainingFraction(reset, now time.Time, period time.Duration) float64 {
 	return frac
 }
 
+// saturated is the utilization (in percent — the endpoint reports 0..100) at or
+// above which a window is treated as a hard blocker: if you're maxed on the 5h
+// window you literally can't use the account right now, regardless of a roomy 7d.
+const saturated = 90.0
+
 // weightedPressure blends the 5h and 7d utilizations, weighting each by how much
 // of its period is still left before it resets (a window about to reset barely
 // counts; one far from reset counts fully). Falls back to max(u5,u7) when neither
 // reset time is known.
+//
+// Guard: a window that is both saturated AND not about to reset is a real
+// bottleneck, so the blend can't average it away below its own value — otherwise
+// an account maxed on 5h (unusable now) but idle on 7d could outrank a steady one.
 func weightedPressure(u5, u7 float64, r5, r7, now time.Time) float64 {
 	f5 := remainingFraction(r5, now, win5h)
 	f7 := remainingFraction(r7, now, win7d)
+	var p float64
 	if f5+f7 == 0 {
-		return max(u5, u7)
+		p = max(u5, u7)
+	} else {
+		p = (f5*u5 + f7*u7) / (f5 + f7)
 	}
-	return (f5*u5 + f7*u7) / (f5 + f7)
+	if f5 > 0.5 && u5 >= saturated {
+		p = max(p, u5)
+	}
+	if f7 > 0.5 && u7 >= saturated {
+		p = max(p, u7)
+	}
+	return p
 }
 
 // ProbeAll probes every account in parallel.
@@ -157,26 +175,14 @@ func Best(accs []accounts.Account, timeout time.Duration) (accounts.Account, []P
 		return ok[0].Account, probes, nil
 	}
 	// fallback: least-recently-used (empty LastUse = never used = preferred)
-	cp := append([]accounts.Account(nil), accs...)
-	sort.SliceStable(cp, func(i, j int) bool { return cp[i].LastUse < cp[j].LastUse })
-	return cp[0], probes, nil
+	return lruFirst(accs), probes, nil
 }
 
-// PickLRU returns the least-recently-used account without any network probe —
-// snappy enough for the interactive resume path. Empty LastUse (never used)
-// sorts first.
-func PickLRU(accs []accounts.Account) (accounts.Account, bool) {
-	if len(accs) == 0 {
-		return accounts.Account{}, false
-	}
+// lruFirst returns the least-recently-used account (empty LastUse = never used,
+// sorts first). Caller guarantees len(accs) > 0.
+func lruFirst(accs []accounts.Account) accounts.Account {
 	cp := append([]accounts.Account(nil), accs...)
 	sort.SliceStable(cp, func(i, j int) bool { return cp[i].LastUse < cp[j].LastUse })
-	return cp[0], true
+	return cp[0]
 }
 
-func max(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
-}

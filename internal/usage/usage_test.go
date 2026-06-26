@@ -27,6 +27,9 @@ func TestWeightedPressure(t *testing.T) {
 		{"discount near-reset", 90, 10, at5, full7, 10},
 		// no reset info → falls back to max(u5,u7)
 		{"unknown resets", 10, 20, time.Time{}, time.Time{}, 20},
+		// 5h saturated AND far from reset → can't be averaged below its own value
+		// (account is unusable now), so it dominates the modest 7d.
+		{"saturated 5h dominates", 100, 10, full5, full7, 100},
 	}
 	for _, c := range cases {
 		got := weightedPressure(c.u5, c.u7, c.r5, c.r7, now)
@@ -46,26 +49,18 @@ func TestRemainingFractionClamps(t *testing.T) {
 	}
 }
 
-func TestPickLRU(t *testing.T) {
+func TestLRUFirst(t *testing.T) {
+	// Best's no-probe fallback: empty LastUse (never used) wins, else oldest.
 	accs := []accounts.Account{
 		{ID: "a", LastUse: "2026-05-28T10:00:00Z"},
 		{ID: "b", LastUse: ""}, // never used -> should win
 		{ID: "c", LastUse: "2026-05-27T10:00:00Z"},
 	}
-	got, ok := PickLRU(accs)
-	if !ok || got.ID != "b" {
-		t.Fatalf("PickLRU debería elegir la nunca usada 'b', eligió %q", got.ID)
+	if got := lruFirst(accs); got.ID != "b" {
+		t.Fatalf("lruFirst debería elegir la nunca usada 'b', eligió %q", got.ID)
 	}
-	// with all used, oldest wins
-	accs[1].LastUse = "2026-05-28T12:00:00Z"
-	got, _ = PickLRU(accs)
-	if got.ID != "c" {
-		t.Fatalf("PickLRU debería elegir la más antigua 'c', eligió %q", got.ID)
-	}
-}
-
-func TestPickLRUEmpty(t *testing.T) {
-	if _, ok := PickLRU(nil); ok {
-		t.Errorf("PickLRU sobre lista vacía debería devolver ok=false")
+	accs[1].LastUse = "2026-05-28T12:00:00Z" // with all used, oldest wins
+	if got := lruFirst(accs); got.ID != "c" {
+		t.Fatalf("lruFirst debería elegir la más antigua 'c', eligió %q", got.ID)
 	}
 }
