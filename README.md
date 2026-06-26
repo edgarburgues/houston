@@ -88,6 +88,8 @@ Para buscar/retomar conversaciones, usa `houston`.
 | `houston doctor` | audita el layout (enlaces, logins, dirs sin compartir) |
 | `houston doctor --fix` | repara el layout de forma idempotente (no pisa datos) |
 | `houston version` | muestra la versión y avisa si hay una más nueva |
+| `houston update` | self-updates the binary from GitHub Releases (verifies SHA-256, asks first) |
+| `houston update --check` | only checks; reports whether a newer version exists |
 
 ## La TUI
 
@@ -143,9 +145,17 @@ dependencias: lo parsea el propio binario.
 
 Houston comprueba GitHub Releases **como mucho una vez al día** (cacheado) y, si
 hay una versión más nueva que la tuya, te lo dice al lanzar (`houston run`), en
-`houston doctor` y en `houston version`. Para actualizar, vuelve a correr el
-instalador (descarga el último binario y verifica su SHA-256). Los builds locales
-(`dev`) nunca avisan.
+`houston doctor` y en `houston version`. Los builds locales (`dev`) nunca avisan.
+
+To update, run **`houston update`**: it fetches the binary for your platform from
+the latest GitHub Release, verifies its SHA-256 against the release's
+`checksums.txt`, and swaps it in over the running one. It shows a pre-warning
+first — **close any other terminals where `houston`/`claude` is open** (sessions
+left open keep the old version until restarted) — and asks for confirmation
+(`-y` skips it). On Windows the in-use binary can't be overwritten, so it's moved
+aside as `houston.exe.old` and cleaned up automatically on a later run. Use
+`houston update --check` to only check, or `--force` to reinstall the current
+version.
 
 ## Estructura
 

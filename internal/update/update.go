@@ -46,8 +46,8 @@ func Notice(current string, timeout time.Duration) string {
 	if latest == "" || !newer(latest, current) {
 		return ""
 	}
-	return fmt.Sprintf("nueva versión %s disponible (tienes %s) — actualiza: https://github.com/%s/releases/latest",
-		latest, current, Repo())
+	return fmt.Sprintf("new version %s available (you have %s) — update with:  houston update",
+		latest, current)
 }
 
 // cachedLatest returns the latest release tag, querying GitHub at most once per

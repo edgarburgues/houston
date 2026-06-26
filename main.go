@@ -4,8 +4,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -27,11 +30,18 @@ var version = "dev"
 
 func main() {
 	args := os.Args[1:]
+	// Best-effort: clear a binary left aside by a previous Windows self-update
+	// once it's no longer locked (see update.Swap / cmdUpdate).
+	if exe, err := os.Executable(); err == nil {
+		update.CleanupStale(exe)
+	}
 	switch {
 	case len(args) > 0 && args[0] == "account":
 		cmdAccount(args[1:])
 	case len(args) > 0 && args[0] == "run":
 		cmdRun(args[1:])
+	case len(args) > 0 && args[0] == "update":
+		cmdUpdate(args[1:])
 	case len(args) > 0 && (args[0] == "version" || args[0] == "--version" || args[0] == "-v"):
 		fmt.Printf("houston %s\n", version)
 		if n := update.Notice(version, 4*time.Second); n != "" {
@@ -221,6 +231,117 @@ func printAccountsTable(probes []usage.Probe, bestID string) {
 	if len(probes) > 1 {
 		time.Sleep(700 * time.Millisecond)
 	}
+}
+
+// --- self-update ----------------------------------------------------------
+
+// cmdUpdate implements `houston update`: it checks GitHub Releases and, with a
+// clear pre-warning + confirmation, downloads the verified binary for this
+// platform and swaps it in over the running one.
+//
+//	houston update            check and, if newer, update (asks first)
+//	houston update --check    only report; touch nothing
+//	houston update -y         don't prompt (for scripts)
+//	houston update --force    reinstall even if up to date / on a dev build
+func cmdUpdate(args []string) {
+	yes, force, checkOnly := false, false, false
+	for _, a := range args {
+		switch a {
+		case "-y", "--yes":
+			yes = true
+		case "--force", "-f":
+			force = true
+		case "--check", "-n", "--dry-run":
+			checkOnly = true
+		default:
+			fmt.Fprintf(os.Stderr, "houston: unknown option %q\n", a)
+			fmt.Fprintln(os.Stderr, "usage: houston update [--check] [-y|--yes] [--force]")
+			os.Exit(1)
+		}
+	}
+
+	if version == "dev" && !force && !checkOnly {
+		fmt.Println("houston: this is a development build (version \"dev\"); it won't self-update.")
+		fmt.Println("  Install it with the installer, or use 'houston update --force' to fetch the latest release.")
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "Checking GitHub Releases for the latest version…")
+	latest := update.FetchLatest(8 * time.Second)
+	if latest == "" {
+		fmt.Fprintln(os.Stderr, "houston: couldn't reach GitHub Releases (offline?). Try again later.")
+		os.Exit(1)
+	}
+	upToDate := !update.Newer(latest, version)
+
+	if checkOnly {
+		if upToDate {
+			fmt.Printf("You're up to date: %s is the latest version.\n", version)
+		} else {
+			fmt.Printf("A new version is available: %s (you have %s).\n  Update with:  houston update\n", latest, version)
+		}
+		return
+	}
+	if upToDate && !force {
+		fmt.Printf("Already on the latest version (%s). Nothing to do.\n", version)
+		fmt.Println("  (use 'houston update --force' to reinstall it)")
+		return
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "houston: couldn't locate my own binary:", err)
+		os.Exit(1)
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+
+	// --- pre-warning: explain what's about to happen before touching anything
+	fmt.Println()
+	if force && upToDate {
+		fmt.Printf("Reinstalling Houston %s (forced) at:\n", latest)
+	} else {
+		fmt.Printf("About to update Houston:  %s  →  %s\n", version, latest)
+	}
+	fmt.Printf("  binary:  %s\n", exe)
+	fmt.Println()
+	fmt.Println("Before continuing:")
+	fmt.Println("  • Close any other terminals/tabs where 'houston' or 'claude' is open.")
+	fmt.Println("  • Sessions left open will keep the current version until you restart them.")
+	if runtime.GOOS == "windows" {
+		fmt.Println("  • On Windows the in-use binary is moved aside as 'houston.exe.old'; it's cleaned up automatically later.")
+	}
+	fmt.Println()
+
+	if !yes {
+		fmt.Print("Continue? [y/N]: ")
+		resp, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		switch strings.ToLower(strings.TrimSpace(resp)) {
+		case "y", "yes":
+		default:
+			fmt.Println("Cancelled. Nothing was changed.")
+			return
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, "Downloading and verifying the binary…")
+	bin, file, err := update.DownloadVerified(latest, 90*time.Second)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "houston: update aborted (nothing was changed):", err)
+		os.Exit(1)
+	}
+	leftover, err := update.Swap(exe, bin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "houston: couldn't replace the binary:", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\n✓ Houston updated to %s (%s).\n", latest, file)
+	if leftover != "" {
+		fmt.Printf("  (the previous binary is still in use by another session; it'll be cleaned up automatically: %s)\n", leftover)
+	}
+	fmt.Println("  Open a new terminal (or restart open ones) to use the new version.")
 }
 
 // --- doctor: audit & repair the multi-account layout ----------------------
