@@ -5,7 +5,7 @@
   then assemble a distributable zip (houston-<ver>.zip).
 #>
 [CmdletBinding()]
-param([string]$Version = '0.3.0')
+param([string]$Version = 'dev')
 
 $ErrorActionPreference = 'Stop'
 $pkg  = $PSScriptRoot
@@ -33,7 +33,7 @@ try {
   $env:CGO_ENABLED = '0'
   foreach ($t in $targets) {
     $env:GOOS = $t.os; $env:GOARCH = $t.arch
-    & $go build -trimpath -ldflags '-s -w' -o (Join-Path $pkg "bin/$($t.os)-$($t.arch)/$($t.exe)") .
+    & $go build -trimpath -ldflags "-s -w -X main.version=$Version" -o (Join-Path $pkg "bin/$($t.os)-$($t.arch)/$($t.exe)") .
     if ($LASTEXITCODE -ne 0) { throw "go build falló: $($t.os)-$($t.arch)" }
     Write-Host ("  ✓ {0}-{1}" -f $t.os, $t.arch) -ForegroundColor Green
   }

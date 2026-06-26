@@ -20,12 +20,15 @@ sin re-onboarding ni "Claude API" sin identidad, Houston da a cada cuenta su pro
   mediante **junctions en Windows** y **symlinks en macOS/Linux** → cualquier
   cuenta ve y retoma **todas** las conversaciones, plugins, skills, subagentes y
   reglas, sin divergencia.
-- **Lanzamiento equilibrado**: `houston run` sondea la cuota de cada cuenta (con su
-  token de login) y elige la **menos cargada**, mostrando antes una tabla con el
-  email y el uso 5h/7d. Prioriza las cuentas que aún no tienen login para que las
-  configures, y permite forzar una con `-a <id>`.
+- **Todo balancea por cuota**: tanto `houston run` como el *resume* de la TUI
+  sondean el uso de cada cuenta y eligen la **menos cargada** (la presión pondera
+  las ventanas 5h/7d por lo lejos que estén de resetear). `run` muestra antes una
+  tabla con el email y el uso 5h/7d, prioriza las cuentas sin login para que las
+  configures, y **solo** te ata a una cuenta concreta con `-a <id>`.
 - **Concurrencia segura**: cada terminal lleva su cuenta en *su* `CLAUDE_CONFIG_DIR`.
   Distintas terminales = distintas cuentas a la vez, sin pisarse.
+- **Auto-gestión y avisos**: `houston doctor` mantiene el layout sano y Houston te
+  avisa cuando hay una versión nueva (ver abajo).
 
 ## Instalación
 
@@ -45,7 +48,7 @@ el binario y deja `houston` en el PATH.
 Los binarios se publican en [Releases](https://github.com/edgarburgues/houston/releases)
 junto a `checksums.txt`. El instalador **verifica el SHA-256** antes de instalar;
 para comprobarlo a mano: `sha256sum -c checksums.txt`. Opciones útiles:
-`./Install.ps1 -Version v0.3.0` (fija una versión), `-NoProfileEdit` (no toca el
+`./Install.ps1 -Version v0.4.0` (fija una versión), `-NoProfileEdit` (no toca el
 perfil ni el PATH).
 
 ## Uso
@@ -73,15 +76,18 @@ cuenta menos cargada, fija su `CLAUDE_CONFIG_DIR` y lanza el `claude` real).
 Es una función de shell, así que no choca con el binario `claude` del PATH.
 Para buscar/retomar conversaciones, usa `houston`.
 
-### Comandos de cuentas
+### Comandos
 | Comando | Acción |
 |---|---|
-| `houston account add <etiqueta>` | registra una cuenta (solo la etiqueta; el login se hace en el primer `houston run`) |
+| `houston run` | lanza la cuenta menos cargada (o la que falte por login) |
+| `houston run -a <id>` | lanza forzando una cuenta concreta |
+| `houston` | TUI: navega, organiza y retoma conversaciones (resume balanceado) |
+| `houston account add <etiqueta>` | registra una cuenta (el login se hace en el primer `houston run`) |
 | `houston account ls` | lista cuentas con su email y presión de cuota (5h / 7d) |
 | `houston account rm <id>` | elimina una cuenta |
-| `houston run -a <id>` | lanza forzando una cuenta concreta |
 | `houston doctor` | audita el layout (enlaces, logins, dirs sin compartir) |
 | `houston doctor --fix` | repara el layout de forma idempotente (no pisa datos) |
+| `houston version` | muestra la versión y avisa si hay una más nueva |
 
 ## La TUI
 
@@ -111,17 +117,35 @@ Nunca pisa datos: si encuentra una carpeta real **con contenido** donde debería
 un enlace, la deja intacta y te dice que la fusiones a mano. Crea los dirs que
 falten en el store compartido y enlaza en cada cuenta los que falten.
 
-## Statusline (cuenta + cuota dentro de Claude)
+## Statusline (cuota de todas las cuentas dentro de Claude)
 
-Houston puede pintar la **cuenta activa y su cuota 5h/7d** en la barra de estado
-de Claude Code, leyendo los `rate_limits` que Claude pasa por stdin (sin `jq` ni
-dependencias: lo parsea el propio binario). En el `settings.json` compartido:
+Houston pinta en la barra de estado de Claude Code la **cuenta activa** (marcada
+con `►`) y el **uso 5h/7d de todas tus cuentas**, así ves de un vistazo cuál tiene
+margen sin salir de la sesión. Actívala en el `settings.json` (el compartido y/o
+el de cada cuenta):
 
 ```json
 { "statusLine": { "type": "command", "command": "houston statusline" } }
 ```
 
-Muestra algo como `🚀 work2 · work2@example.com · 5h 41% · 7d 7% · Opus 4.8 · ctx 12%`.
+Muestra algo como:
+
+```
+🚀 5h/7d  work 12/3 · ►work2 41/7 · work3 88/20 · Opus 4.8 · ctx 12%
+```
+
+La cuenta activa usa los `rate_limits` que Claude pasa por stdin (en vivo); las
+demás se sondean y se **cachean ~60 s** (conservando el último valor bueno ante un
+429), de modo que la barra es instantánea y no satura el endpoint. Sin `jq` ni
+dependencias: lo parsea el propio binario.
+
+## Actualizaciones
+
+Houston comprueba GitHub Releases **como mucho una vez al día** (cacheado) y, si
+hay una versión más nueva que la tuya, te lo dice al lanzar (`houston run`), en
+`houston doctor` y en `houston version`. Para actualizar, vuelve a correr el
+instalador (descarga el último binario y verifica su SHA-256). Los builds locales
+(`dev`) nunca avisan.
 
 ## Estructura
 
@@ -137,7 +161,8 @@ houston/
 ├── internal/
 │   ├── accounts/  usage/  launch/     cuentas, sondeo de cuota, lanzamiento
 │   ├── provision/                     layout multi-cuenta (doctor: audita/repara)
-│   ├── statusline/                    barra de estado: cuenta activa + cuota
+│   ├── statusline/                    barra de estado: cuenta activa + cuota de todas
+│   ├── update/                        aviso de nuevas versiones (GitHub Releases)
 │   ├── scan/  model/  pathenc/        descubrimiento e indexado de misiones
 │   ├── resume/  export/               retomar y exportar (balanceado)
 │   └── tui/                           interfaz (misiones + cuentas)
@@ -163,9 +188,10 @@ go test ./...                # tests
 ```
 Go ≥ 1.26, sin cgo. Dependencias: Bubble Tea / Bubbles / Lip Gloss.
 
-Publicar una versión: empuja un tag `v*` (p.ej. `git tag v0.3.0 && git push origin
-v0.3.0`). El workflow `release.yml` cross-compila las 6 plataformas, genera
-`checksums.txt` y crea la GitHub Release con todo adjunto.
+Publicar una versión: empuja un tag `v*` (p.ej. `git tag v0.5.0 && git push origin
+v0.5.0`). El workflow `release.yml` cross-compila las 6 plataformas embebiendo el
+tag como versión (`-X main.version=$tag`, lo que usa el aviso de actualizaciones),
+genera `checksums.txt` y crea la GitHub Release con todo adjunto.
 
 ## Licencia
 

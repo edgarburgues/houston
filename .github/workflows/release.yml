@@ -33,7 +33,7 @@ jobs:
             out="dist/houston-${os}-${arch}"
             if [ "$os" = "windows" ]; then out="${out}.exe"; fi
             echo "→ $out"
-            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags '-s -w' -o "$out" .
+            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "$out" .
           done
 
       - name: Checksums

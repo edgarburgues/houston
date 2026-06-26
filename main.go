@@ -17,8 +17,13 @@ import (
 	"houston/internal/statusline"
 	"houston/internal/store"
 	"houston/internal/tui"
+	"houston/internal/update"
 	"houston/internal/usage"
 )
+
+// version is the build version, set via -ldflags "-X main.version=v0.5.0" in
+// release builds. Local/source builds keep "dev" (which suppresses update nags).
+var version = "dev"
 
 func main() {
 	args := os.Args[1:]
@@ -27,6 +32,11 @@ func main() {
 		cmdAccount(args[1:])
 	case len(args) > 0 && args[0] == "run":
 		cmdRun(args[1:])
+	case len(args) > 0 && (args[0] == "version" || args[0] == "--version" || args[0] == "-v"):
+		fmt.Printf("houston %s\n", version)
+		if n := update.Notice(version, 4*time.Second); n != "" {
+			fmt.Println(n)
+		}
 	case len(args) > 0 && args[0] == "doctor":
 		cmdDoctor(args[1:])
 	case len(args) > 0 && args[0] == "statusline":
@@ -133,6 +143,9 @@ func cmdRun(args []string) {
 		}
 	}
 	printAccountsTable(probes, best.ID)
+	if n := update.Notice(version, 3*time.Second); n != "" {
+		fmt.Fprintln(os.Stderr, "houston: "+n)
+	}
 	if !best.LoggedIn() {
 		fmt.Fprintln(os.Stderr, "  (cuenta sin login — escribe /login dentro de Claude esta primera vez)")
 	}
@@ -257,6 +270,9 @@ func cmdDoctor(args []string) {
 		}
 	}
 
+	if n := update.Notice(version, 3*time.Second); n != "" {
+		fmt.Println("\nhouston: " + n)
+	}
 	if !fix {
 		if drift {
 			fmt.Println("\nHay deriva. Repara con:  houston doctor --fix")
