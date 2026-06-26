@@ -121,20 +121,24 @@ falten en el store compartido y enlaza en cada cuenta los que falten.
 
 ## Statusline (cuota de todas las cuentas dentro de Claude)
 
-Houston pinta en la barra de estado de Claude Code la **cuenta activa** (marcada
-con `►`) y el **uso 5h/7d de todas tus cuentas**, así ves de un vistazo cuál tiene
-margen sin salir de la sesión. Actívala en el `settings.json` (el compartido y/o
-el de cada cuenta):
+Houston pinta en la barra de estado de Claude Code una **barra de uso por cada
+cuenta** (la activa marcada con `►`), coloreada verde/ámbar/rojo según lo llena
+que esté, así ves de un vistazo cuál tiene margen sin salir de la sesión. La barra
+sigue la ventana de **5h** (el límite que tocas antes). Actívala en el
+`settings.json` (el compartido y/o el de cada cuenta):
 
 ```json
 { "statusLine": { "type": "command", "command": "houston statusline" } }
 ```
 
-Muestra algo como:
+Muestra algo como (en el terminal va en color):
 
 ```
-🚀 5h/7d  work 12/3 · ►work2 41/7 · work3 88/20 · Opus 4.8 · ctx 12%
+work ▕█░░░░░░░▏ 12% │ ►personal ▕████▋░░░▏ 58% │ trabajo ▕███████▎▏ 91% │ Opus 4.8 · ctx 12%
 ```
+
+Respeta `NO_COLOR` (degrada a texto plano). Las cuentas sin login/uso salen como
+`off` con la barra vacía.
 
 La cuenta activa usa los `rate_limits` que Claude pasa por stdin (en vivo); las
 demás se sondean y se **cachean ~60 s** (conservando el último valor bueno ante un

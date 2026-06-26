@@ -19,7 +19,47 @@ func TestAccountID(t *testing.T) {
 	}
 }
 
-func TestRenderAllAccountsWithActiveMark(t *testing.T) {
+func TestLevelColor(t *testing.T) {
+	cases := []struct {
+		pct  float64
+		want string
+	}{
+		{0, cGreen}, {49, cGreen}, {50, cAmber}, {79, cAmber}, {80, cRed}, {100, cRed},
+	}
+	for _, c := range cases {
+		if got := levelColor(c.pct); got != c.want {
+			t.Errorf("levelColor(%v) = %q, want %q", c.pct, got, c.want)
+		}
+	}
+}
+
+func TestBarCells(t *testing.T) {
+	// width is always preserved: len(filled runes)+len(empty runes) accounts for
+	// every cell (the partial boundary cell counts as one filled rune).
+	cases := []struct {
+		pct                   float64
+		wantFilled, wantEmpty string
+	}{
+		{0, "", "░░░░░░░░"},
+		{100, "████████", ""},
+		{50, "████", "░░░░"},    // 50% of 8 = exactly 4 cells
+		{56.25, "████▌", "░░░"}, // 4.5 cells → 4 full + a half block
+		{200, "████████", ""},   // clamped
+		{-5, "", "░░░░░░░░"},    // clamped
+	}
+	for _, c := range cases {
+		f, e := barCells(c.pct, barWidth)
+		if f != c.wantFilled || e != c.wantEmpty {
+			t.Errorf("barCells(%v) = (%q,%q), want (%q,%q)", c.pct, f, e, c.wantFilled, c.wantEmpty)
+		}
+		if len([]rune(f))+len([]rune(e)) != barWidth {
+			t.Errorf("barCells(%v) total cells = %d, want %d", c.pct, len([]rune(f))+len([]rune(e)), barWidth)
+		}
+	}
+}
+
+func TestRenderPlain(t *testing.T) {
+	t.Setenv("NO_COLOR", "1") // deterministic, escape-code-free output
 	ctx := 12.0
 	rows := []row{
 		{ID: "work", U5: 12, U7: 3, OK: true},
@@ -27,21 +67,48 @@ func TestRenderAllAccountsWithActiveMark(t *testing.T) {
 		{ID: "work3", OK: false}, // not logged in / probe failed
 	}
 	got := Render(rows, "Opus 4.8", &ctx)
-	// every account shown, active marked, failed one shown as —
-	for _, want := range []string{"work 12/3", "►work2 41/7", "work3 —", "Opus 4.8", "ctx 12%"} {
+	for _, want := range []string{
+		"work ▕", "12%", // first account: id + bar + percent
+		"►work2 ▕", "41%", // active account marked and shown
+		"work3 ▕", "off", // failed account: empty bar + off
+		" │ ", // separators between segments
+		"Opus 4.8", "ctx 12%",
+	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("línea %q no contiene %q", got, want)
+			t.Errorf("line %q does not contain %q", got, want)
 		}
 	}
-	// only the active account carries the ► marker
+	if strings.Contains(got, "🚀") {
+		t.Errorf("rocket should be gone: %q", got)
+	}
 	if strings.Count(got, "►") != 1 {
-		t.Errorf("debería haber exactamente un marcador de cuenta activa: %q", got)
+		t.Errorf("exactly one active marker expected: %q", got)
+	}
+	if strings.Contains(got, "\x1b[") {
+		t.Errorf("NO_COLOR set but ANSI codes present: %q", got)
+	}
+}
+
+func TestRenderColorEmitsANSI(t *testing.T) {
+	t.Setenv("NO_COLOR", "") // force color on
+	rows := []row{{ID: "work2", U5: 41, OK: true, Active: true}}
+	got := Render(rows, "", nil)
+	if !strings.Contains(got, "\x1b[") {
+		t.Errorf("expected ANSI color codes when NO_COLOR is unset: %q", got)
+	}
+	// id and percent stay contiguous (not split by codes) so they remain greppable
+	if !strings.Contains(got, "►work2") || !strings.Contains(got, "41%") {
+		t.Errorf("id/percent should remain intact: %q", got)
 	}
 }
 
 func TestRenderNoAccounts(t *testing.T) {
-	got := Render(nil, "", nil)
-	if !strings.Contains(got, "🚀") {
-		t.Errorf("debería seguir mostrando algo aunque no haya cuentas: %q", got)
+	// With no accounts and no model the line is empty (no rocket placeholder);
+	// a model alone still renders.
+	if got := Render(nil, "", nil); got != "" {
+		t.Errorf("empty input should render empty, got %q", got)
+	}
+	if got := Render(nil, "Opus 4.8", nil); !strings.Contains(got, "Opus 4.8") {
+		t.Errorf("model alone should still render: %q", got)
 	}
 }

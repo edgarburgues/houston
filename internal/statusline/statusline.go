@@ -1,7 +1,8 @@
-// Package statusline renders Claude Code's status line for Houston: it shows the
-// ACTIVE account (derived from CLAUDE_CONFIG_DIR) and the 5h/7d quota of EVERY
-// Houston account — not just the one you launched — so you can see at a glance
-// which account has headroom while you work.
+// Package statusline renders Claude Code's status line for Houston: a colored
+// usage bar for EVERY Houston account — not just the one you launched — with the
+// ACTIVE account (derived from CLAUDE_CONFIG_DIR) marked, so you can see at a
+// glance which account has headroom. The bar tracks the 5h window (the limit you
+// hit first), colored green/amber/red by how full it is.
 //
 // The active account's quota comes live from the status-line JSON Claude pipes on
 // stdin (rate_limits); the other accounts are probed against the usage endpoint
@@ -17,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,33 +99,126 @@ func Line(r io.Reader, configDir string) string {
 	return Render(rows, in.Model.DisplayName, ctx)
 }
 
-// Render formats the status line: 🚀, then each account as "id 5h/7d" (the active
-// one marked with ►), then the model and context usage if known. Pure (no I/O) so
-// it's testable without the network.
+// --- rendering -------------------------------------------------------------
+
+const barWidth = 8 // cells per usage bar
+
+// ANSI 256-color codes. Emitted only when useColor() is true.
+const (
+	cReset  = "\x1b[0m"
+	cBold   = "\x1b[1m"
+	cGreen  = "\x1b[38;5;42m"  // plenty of headroom
+	cAmber  = "\x1b[38;5;214m" // filling up
+	cRed    = "\x1b[38;5;203m" // nearly out
+	cDim    = "\x1b[38;5;240m" // brackets, separators, empty cells, meta
+	cActive = "\x1b[38;5;45m"  // the active account's id + ► marker
+)
+
+// useColor reports whether to emit ANSI codes. Disabled when NO_COLOR is set
+// (see https://no-color.org) so the line degrades cleanly to plain text.
+func useColor() bool { return os.Getenv("NO_COLOR") == "" }
+
+// levelColor maps a usage percentage to its color: green < 50 ≤ amber < 80 ≤ red.
+func levelColor(pct float64) string {
+	switch {
+	case pct >= 80:
+		return cRed
+	case pct >= 50:
+		return cAmber
+	default:
+		return cGreen
+	}
+}
+
+// barCells splits a width-cell bar at pct into its filled and empty runes, using
+// eighth-blocks for the boundary cell so the bar grows smoothly. Pure and
+// color-free: the filled/empty split is all Render needs to colorize it.
+func barCells(pct float64, width int) (filled, empty string) {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	eighths := int(math.Round(pct / 100 * float64(width*8)))
+	full, rem := eighths/8, eighths%8
+	var f, e strings.Builder
+	for i := 0; i < width; i++ {
+		switch {
+		case i < full:
+			f.WriteRune('█')
+		case i == full && rem > 0:
+			f.WriteRune([]rune{' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'}[rem])
+		default:
+			e.WriteRune('░')
+		}
+	}
+	return f.String(), e.String()
+}
+
+// bar renders "▕███▌░░░▏" with the filled part in the level color and the track
+// dim. With color off it's just the plain blocks (for tests / NO_COLOR).
+func bar(pct float64, color bool) string {
+	filled, empty := barCells(pct, barWidth)
+	if !color {
+		return "▕" + filled + empty + "▏"
+	}
+	return cDim + "▕" + levelColor(pct) + filled + cDim + empty + "▏" + cReset
+}
+
+// Render builds the status line: one colored usage bar per account (the active
+// one marked ►), separated by │, then the model and context usage. The bar shows
+// the 5h window — the limit you hit first — colored green/amber/red by how full
+// it is. Pure (no I/O), honors NO_COLOR, so it's testable without the network.
 func Render(rows []row, model string, ctxPct *float64) string {
+	color := useColor()
+	sep := " │ "
+	if color {
+		sep = cDim + " │ " + cReset
+	}
+
 	var parts []string
 	for _, r := range rows {
-		mark := ""
+		label := r.ID
 		if r.Active {
-			mark = "►"
+			label = "►" + r.ID
+			if color {
+				label = cActive + cBold + label + cReset
+			}
 		}
+		var pct, b string
 		if r.OK {
-			parts = append(parts, fmt.Sprintf("%s%s %.0f/%.0f", mark, r.ID, r.U5, r.U7))
+			b = bar(r.U5, color)
+			pct = fmt.Sprintf("%.0f%%", r.U5)
+			if color {
+				pct = levelColor(r.U5) + pct + cReset
+			}
 		} else {
-			parts = append(parts, fmt.Sprintf("%s%s —", mark, r.ID))
+			b = bar(0, color) // empty dim track
+			pct = "off"
+			if color {
+				pct = cDim + "off" + cReset
+			}
 		}
+		parts = append(parts, label+" "+b+" "+pct)
 	}
-	line := "🚀 5h/7d"
-	if len(parts) > 0 {
-		line += " " + strings.Join(parts, " · ")
-	}
-	if model != "" {
-		line += " · " + model
-	}
+
+	meta := model
 	if ctxPct != nil {
-		line += fmt.Sprintf(" · ctx %.0f%%", *ctxPct)
+		if meta != "" {
+			meta += " · "
+		}
+		meta += fmt.Sprintf("ctx %.0f%%", *ctxPct)
 	}
-	return line
+	if meta != "" && color {
+		meta = cDim + meta + cReset
+	}
+
+	segs := parts
+	if meta != "" {
+		segs = append(segs, meta)
+	}
+	return strings.Join(segs, sep)
 }
 
 // --- cached probe ----------------------------------------------------------
