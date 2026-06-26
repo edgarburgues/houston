@@ -27,7 +27,10 @@ $accountsJson  = Join-Path $HOME '.claude\houston\accounts.json'
 $srcConfig     = Join-Path $HOME '.claude.json'            # onboarded template (hasCompletedOnboarding=true)
 $srcSettings   = Join-Path $HOME '.claude\settings.json'
 $srcMcp        = Join-Path $HOME '.claude\mcp.json'
-$shareDirs     = @('projects','sessions','plugins','plans','todos','skills')
+# Keep in sync with provision.ShareDirs in the Go code (houston doctor uses that
+# list). Data dirs first, then user-level customizations shared across accounts.
+$shareDirs     = @('projects','sessions','plugins','plans','todos',
+                   'skills','commands','agents','workflows','rules','output-styles','themes')
 
 $isWin = $IsWindows
 function New-Link($link, $target) {

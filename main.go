@@ -12,7 +12,9 @@ import (
 	"houston/internal/accounts"
 	"houston/internal/launch"
 	"houston/internal/model"
+	"houston/internal/provision"
 	"houston/internal/scan"
+	"houston/internal/statusline"
 	"houston/internal/store"
 	"houston/internal/tui"
 	"houston/internal/usage"
@@ -25,6 +27,12 @@ func main() {
 		cmdAccount(args[1:])
 	case len(args) > 0 && args[0] == "run":
 		cmdRun(args[1:])
+	case len(args) > 0 && args[0] == "doctor":
+		cmdDoctor(args[1:])
+	case len(args) > 0 && args[0] == "statusline":
+		// Reads the status-line JSON from stdin; prints the active account plus
+		// every account's 5h/7d quota.
+		fmt.Println(statusline.Line(os.Stdin, os.Getenv("CLAUDE_CONFIG_DIR")))
 	default:
 		cmdTUI(args)
 	}
@@ -68,7 +76,7 @@ func cmdAccount(args []string) {
 			switch {
 			case p.OK:
 				fmt.Printf("%-16s %-30s %6.0f%%   %.0f%% / %.0f%%\n",
-					p.Account.ID, trunc(name, 30), pct(p.Pressure), pct(p.U5), pct(p.U7))
+					p.Account.ID, trunc(name, 30), p.Pressure, p.U5, p.U7)
 			case !p.Account.LoggedIn():
 				fmt.Printf("%-16s %-30s   (sin login todavía)\n", p.Account.ID, trunc(name, 30))
 			default:
@@ -182,7 +190,7 @@ func printAccountsTable(probes []usage.Probe, bestID string) {
 		}
 		use := "    —  /   —"
 		if p.OK {
-			use = fmt.Sprintf("%4.0f%% / %4.0f%%", pct(p.U5), pct(p.U7))
+			use = fmt.Sprintf("%4.0f%% / %4.0f%%", p.U5, p.U7)
 		}
 		fmt.Fprintf(os.Stderr, "%s%-8s %-34s %s\n", mark, p.Account.ID, trunc(email, 34), use)
 	}
@@ -195,7 +203,85 @@ func printAccountsTable(probes []usage.Probe, bestID string) {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "→ lanzando: %s%s\n", bestID, be)
-	time.Sleep(1500 * time.Millisecond) // un instante para poder leer la tabla
+	// Una pausa breve para leer la tabla antes de que claude pinte la pantalla.
+	// Con una sola cuenta no hay nada que comparar, así que no esperamos.
+	if len(probes) > 1 {
+		time.Sleep(700 * time.Millisecond)
+	}
+}
+
+// --- doctor: audit & repair the multi-account layout ----------------------
+
+func cmdDoctor(args []string) {
+	fix := false
+	for _, a := range args {
+		if a == "--fix" || a == "fix" || a == "-f" {
+			fix = true
+		}
+	}
+	accs, _ := accounts.Load()
+	if len(accs) == 0 {
+		fmt.Fprintln(os.Stderr, "houston: no hay cuentas; añade una con 'houston account add'")
+		os.Exit(1)
+	}
+
+	sharedMissing, reports := provision.Audit(accs)
+	fmt.Printf("Store compartido: %s\n", provision.SharedDir())
+	if len(sharedMissing) > 0 {
+		fmt.Printf("  faltan dirs: %s\n", strings.Join(sharedMissing, ", "))
+	} else {
+		fmt.Println("  todos los dirs presentes")
+	}
+
+	drift := len(sharedMissing) > 0
+	for _, r := range reports {
+		fmt.Printf("\n[%s] %s\n", r.Account.ID, r.ConfigDir)
+		login := "sin login"
+		if r.LoggedIn {
+			login = "login ✓"
+		}
+		cfg := ".claude.json ✓"
+		if !r.HasConfig {
+			cfg = ".claude.json FALTA"
+		}
+		fmt.Printf("  %s · %s\n", login, cfg)
+		for _, d := range r.Dirs {
+			mark := "  ✓"
+			if !d.State.OK() {
+				mark = "  ✗"
+			}
+			fmt.Printf("  %s %-14s %s\n", mark, d.Name, d.State)
+		}
+		if r.HasDrift() {
+			drift = true
+		}
+	}
+
+	if !fix {
+		if drift {
+			fmt.Println("\nHay deriva. Repara con:  houston doctor --fix")
+		} else {
+			fmt.Println("\nTodo en orden.")
+		}
+		return
+	}
+
+	fmt.Println("\nReparando…")
+	res, err := provision.Fix(accs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "houston: fallo reparando:", err)
+		os.Exit(1)
+	}
+	for _, c := range res.Created {
+		fmt.Println("  + " + c)
+	}
+	for _, s := range res.Skipped {
+		fmt.Println("  ! " + s)
+	}
+	if len(res.Created) == 0 && len(res.Skipped) == 0 {
+		fmt.Println("  (nada que cambiar)")
+	}
+	fmt.Println("Listo.")
 }
 
 // --- TUI / debug ----------------------------------------------------------
@@ -246,11 +332,6 @@ func cmdTUI(args []string) {
 		os.Exit(1)
 	}
 }
-
-// pct returns the utilization as a percentage. The OAuth usage endpoint already
-// reports it in percent (e.g. 41 = 41%, 1 = 1%), so it's used as-is — no scaling
-// (an earlier ×100 turned a real 1% into 100%).
-func pct(v float64) float64 { return v }
 
 func trunc(s string, n int) string {
 	r := []rune(s)

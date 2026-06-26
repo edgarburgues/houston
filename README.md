@@ -14,10 +14,12 @@ sin re-onboarding ni "Claude API" sin identidad, Houston da a cada cuenta su pro
 - **Un config dir por cuenta** (`~/.claude-accounts/account-<id>`): login propio
   (`/login` una sola vez) y onboarding aislados. Así Claude muestra el email real
   de la cuenta.
-- **Datos compartidos** (`projects`, `sessions`, `plugins`, `plans`, `todos`, `skills`)
-  enlazados a un store común `~/.claude-shared` mediante **junctions en Windows**
-  y **symlinks en macOS/Linux** → cualquier cuenta ve y retoma **todas** las
-  conversaciones, plugins y skills, sin divergencia.
+- **Datos compartidos** (`projects`, `sessions`, `plugins`, `plans`, `todos`) y
+  **personalizaciones de usuario** (`skills`, `commands`, `agents`, `workflows`,
+  `rules`, `output-styles`, `themes`) enlazados a un store común `~/.claude-shared`
+  mediante **junctions en Windows** y **symlinks en macOS/Linux** → cualquier
+  cuenta ve y retoma **todas** las conversaciones, plugins, skills, subagentes y
+  reglas, sin divergencia.
 - **Lanzamiento equilibrado**: `houston run` sondea la cuota de cada cuenta (con su
   token de login) y elige la **menos cargada**, mostrando antes una tabla con el
   email y el uso 5h/7d. Prioriza las cuentas que aún no tienen login para que las
@@ -78,6 +80,8 @@ Para buscar/retomar conversaciones, usa `houston`.
 | `houston account ls` | lista cuentas con su email y presión de cuota (5h / 7d) |
 | `houston account rm <id>` | elimina una cuenta |
 | `houston run -a <id>` | lanza forzando una cuenta concreta |
+| `houston doctor` | audita el layout (enlaces, logins, dirs sin compartir) |
+| `houston doctor --fix` | repara el layout de forma idempotente (no pisa datos) |
 
 ## La TUI
 
@@ -94,6 +98,31 @@ El **resume** hace `cd` al directorio correcto (resuelve incluso nombres con
 guiones ambiguos) y lanza `claude --resume` con la cuenta elegida — adiós al
 "No conversation found".
 
+## Auto-gestión: `houston doctor`
+
+El layout multi-cuenta (store compartido + un dir por cuenta + enlaces) puede
+derivar con el tiempo: enlaces que faltan, una carpeta real donde debería ir un
+enlace, una cuenta sin login. `houston doctor` lo **audita** y `houston doctor
+--fix` lo **repara**, de forma idempotente y multiplataforma (junctions en
+Windows sin admin, symlinks en macOS/Linux). Es la versión en Go —y portable— de
+lo que hacía `houston-setup-accounts.ps1`.
+
+Nunca pisa datos: si encuentra una carpeta real **con contenido** donde debería ir
+un enlace, la deja intacta y te dice que la fusiones a mano. Crea los dirs que
+falten en el store compartido y enlaza en cada cuenta los que falten.
+
+## Statusline (cuenta + cuota dentro de Claude)
+
+Houston puede pintar la **cuenta activa y su cuota 5h/7d** en la barra de estado
+de Claude Code, leyendo los `rate_limits` que Claude pasa por stdin (sin `jq` ni
+dependencias: lo parsea el propio binario). En el `settings.json` compartido:
+
+```json
+{ "statusLine": { "type": "command", "command": "houston statusline" } }
+```
+
+Muestra algo como `🚀 work2 · work2@example.com · 5h 41% · 7d 7% · Opus 4.8 · ctx 12%`.
+
 ## Estructura
 
 ```
@@ -107,8 +136,10 @@ houston/
 ├── LICENSE                MIT
 ├── internal/
 │   ├── accounts/  usage/  launch/     cuentas, sondeo de cuota, lanzamiento
+│   ├── provision/                     layout multi-cuenta (doctor: audita/repara)
+│   ├── statusline/                    barra de estado: cuenta activa + cuota
 │   ├── scan/  model/  pathenc/        descubrimiento e indexado de misiones
-│   ├── resume/  export/               retomar y exportar
+│   ├── resume/  export/               retomar y exportar (balanceado)
 │   └── tui/                           interfaz (misiones + cuentas)
 └── main.go · go.mod
 ```
