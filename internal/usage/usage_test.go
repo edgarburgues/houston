@@ -54,6 +54,26 @@ func TestSaturationGuardUsesAbsoluteTime(t *testing.T) {
 	}
 }
 
+func TestExpiredMs(t *testing.T) {
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	ms := func(t time.Time) int64 { return t.UnixMilli() }
+	cases := []struct {
+		name string
+		exp  int64
+		want bool
+	}{
+		{"caducado hace horas", ms(now.Add(-3 * time.Hour)), true},
+		{"caduca dentro del margen (30s)", ms(now.Add(30 * time.Second)), true},
+		{"vigente con holgura", ms(now.Add(2 * time.Hour)), false},
+		{"desconocido (0): se intenta tal cual", 0, false},
+	}
+	for _, c := range cases {
+		if got := expiredMs(c.exp, now); got != c.want {
+			t.Errorf("%s: expiredMs=%v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestProbeTokenEmptyFailsFast(t *testing.T) {
 	// Una cuenta sin login no tiene credencial: debe fallar sin red (y sin
 	// esperar el timeout) en vez de enviar un Bearer vacío condenado al 401.

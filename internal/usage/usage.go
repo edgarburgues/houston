@@ -9,6 +9,7 @@ package usage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"houston/internal/accounts"
+	"houston/internal/oauth"
 )
 
 const (
@@ -48,6 +50,10 @@ type usageResp struct {
 	SevenDay usageWindow `json:"seven_day"`
 }
 
+// errUnauthorized flags a 401 from the usage endpoint: the token is expired or
+// revoked, which probeAccount treats as "refresh and retry once".
+var errUnauthorized = errors.New("usage HTTP 401")
+
 // ProbeToken queries usage for a single token. An empty token (a dir that was
 // never logged in) fails fast instead of firing a doomed request with an empty
 // bearer — one per account per probe otherwise: the run table, `account ls`
@@ -66,6 +72,9 @@ func ProbeToken(token string, timeout time.Duration) (u5, u7 float64, r5, r7 tim
 		return 0, 0, time.Time{}, time.Time{}, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == 401 {
+		return 0, 0, time.Time{}, time.Time{}, errUnauthorized
+	}
 	if resp.StatusCode != 200 {
 		return 0, 0, time.Time{}, time.Time{}, fmt.Errorf("usage HTTP %d", resp.StatusCode)
 	}
@@ -152,6 +161,69 @@ func weightedPressure(u5, u7 float64, r5, r7, now time.Time) float64 {
 	return p
 }
 
+// expiredMs reports whether a unix-ms expiry has passed, with a safety margin
+// so a token about to die mid-probe already counts as expired. Zero (unknown)
+// is not treated as expired: the token is tried as-is and a 401 sorts it out.
+func expiredMs(ms int64, now time.Time) bool {
+	const margin = 60_000 // ms
+	return ms != 0 && now.UnixMilli() > ms-margin
+}
+
+// refreshAndSave renews an account's access token from its refresh token and
+// persists the result to the account's .credentials.json BEFORE returning it:
+// the endpoint may rotate the refresh token, and a rotated token that never
+// hits disk strands the account (next refresh would use a dead token).
+func refreshAndSave(a accounts.Account, refreshToken string, timeout time.Duration) (string, error) {
+	if refreshToken == "" {
+		return "", fmt.Errorf("token caducado y sin refresh token — re-login: houston run -a %s", a.ID)
+	}
+	t, err := oauth.Refresh(refreshToken, timeout)
+	if err != nil {
+		return "", fmt.Errorf("refresh rechazado (¿revocado/caducado? re-login: houston run -a %s): %w", a.ID, err)
+	}
+	if err := a.SaveTokens(t.AccessToken, t.RefreshToken, t.ExpiresAt); err != nil {
+		return "", fmt.Errorf("token refrescado pero no pude guardarlo: %w", err)
+	}
+	return t.AccessToken, nil
+}
+
+// probeAccount fetches one account's usage, transparently refreshing (and
+// persisting) an expired or revoked access token, so idle accounts keep
+// reporting real usage instead of decaying into 401s between logins.
+func probeAccount(a accounts.Account, timeout time.Duration, now time.Time) Probe {
+	p := Probe{Account: a}
+	c, ok := a.Credential()
+	if !ok {
+		p.Err = "sin credencial (cuenta sin login)"
+		return p
+	}
+	token, refreshed := c.AccessToken, false
+	if expiredMs(c.ExpiresAt, now) {
+		t, err := refreshAndSave(a, c.RefreshToken, timeout)
+		if err != nil {
+			p.Err = err.Error()
+			return p
+		}
+		token, refreshed = t, true
+	}
+	u5, u7, r5, r7, err := ProbeToken(token, timeout)
+	if errors.Is(err, errUnauthorized) && !refreshed {
+		// expiresAt said the token was still valid but the endpoint rejects it
+		// (revoked by a re-login or an external refresh): one refresh + retry.
+		if t, rerr := refreshAndSave(a, c.RefreshToken, timeout); rerr == nil {
+			u5, u7, r5, r7, err = ProbeToken(t, timeout)
+		}
+	}
+	if err != nil {
+		p.Err = err.Error()
+		return p
+	}
+	p.U5, p.U7, p.Reset5, p.Reset7 = u5, u7, r5, r7
+	p.Pressure = weightedPressure(u5, u7, r5, r7, now)
+	p.OK = true
+	return p
+}
+
 // ProbeAll probes every account in parallel.
 func ProbeAll(accs []accounts.Account, timeout time.Duration) []Probe {
 	now := time.Now()
@@ -161,16 +233,7 @@ func ProbeAll(accs []accounts.Account, timeout time.Duration) []Probe {
 		wg.Add(1)
 		go func(i int, a accounts.Account) {
 			defer wg.Done()
-			p := Probe{Account: a}
-			u5, u7, r5, r7, err := ProbeToken(a.ProbeCredential(), timeout)
-			if err != nil {
-				p.Err = err.Error()
-			} else {
-				p.U5, p.U7, p.Reset5, p.Reset7 = u5, u7, r5, r7
-				p.Pressure = weightedPressure(u5, u7, r5, r7, now)
-				p.OK = true
-			}
-			out[i] = p
+			out[i] = probeAccount(a, timeout, now)
 		}(i, a)
 	}
 	wg.Wait()

@@ -71,23 +71,87 @@ func (a Account) Email() string {
 	return d.OauthAccount.EmailAddress
 }
 
-// ProbeCredential returns the token to query the usage endpoint: the account's
-// own logged-in accessToken (it carries the subscription usage scope) if the
-// dir has been logged in, else "" (so the probe fails and the account shows as
-// "not logged in yet").
-func (a Account) ProbeCredential() string {
-	b, err := os.ReadFile(filepath.Join(a.ResolveConfigDir(), ".credentials.json"))
-	if err == nil {
-		var d struct {
-			ClaudeAiOauth struct {
-				AccessToken string `json:"accessToken"`
-			} `json:"claudeAiOauth"`
-		}
-		if json.Unmarshal(b, &d) == nil && d.ClaudeAiOauth.AccessToken != "" {
-			return d.ClaudeAiOauth.AccessToken
+// Credential is the claudeAiOauth block of .credentials.json Houston needs:
+// the accessToken to probe usage (it carries the subscription usage scope),
+// plus the refreshToken/expiry to renew it when it lapses.
+type Credential struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	ExpiresAt    int64  `json:"expiresAt"` // unix milliseconds
+}
+
+// Credential reads the account's stored OAuth credential. ok=false when the
+// dir was never logged in (no file or no accessToken).
+func (a Account) Credential() (Credential, bool) {
+	b, err := os.ReadFile(a.credentialsPath())
+	if err != nil {
+		return Credential{}, false
+	}
+	var d struct {
+		ClaudeAiOauth Credential `json:"claudeAiOauth"`
+	}
+	if json.Unmarshal(b, &d) != nil {
+		return Credential{}, false
+	}
+	return d.ClaudeAiOauth, d.ClaudeAiOauth.AccessToken != ""
+}
+
+// SaveTokens writes refreshed OAuth tokens back into the account's
+// .credentials.json, preserving every other field (top level and inside
+// claudeAiOauth — scopes, subscriptionType, etc. survive untouched). Atomic
+// write with 0600: it's the very file Claude Code reads, so the next launch
+// of this account picks up the fresh token too.
+func (a Account) SaveTokens(access, refresh string, expiresAt int64) error {
+	p := a.credentialsPath()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return err
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(b, &top); err != nil {
+		return err
+	}
+	oa := map[string]json.RawMessage{}
+	if raw, ok := top["claudeAiOauth"]; ok {
+		if err := json.Unmarshal(raw, &oa); err != nil {
+			return err
 		}
 	}
-	return ""
+	set := func(key string, v any) error {
+		enc, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		oa[key] = enc
+		return nil
+	}
+	if err := set("accessToken", access); err != nil {
+		return err
+	}
+	if err := set("refreshToken", refresh); err != nil {
+		return err
+	}
+	if err := set("expiresAt", expiresAt); err != nil {
+		return err
+	}
+	enc, err := json.Marshal(oa)
+	if err != nil {
+		return err
+	}
+	top["claudeAiOauth"] = enc
+	out, err := json.Marshal(top)
+	if err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+func (a Account) credentialsPath() string {
+	return filepath.Join(a.ResolveConfigDir(), ".credentials.json")
 }
 
 // StoreDir is Houston's own data dir, kept stable regardless of
