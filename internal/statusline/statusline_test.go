@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"houston/internal/usage"
 )
 
 func TestAccountID(t *testing.T) {
@@ -16,6 +18,34 @@ func TestAccountID(t *testing.T) {
 		if got := accountID(in); got != want {
 			t.Errorf("accountID(%q)=%q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestMergeProbe(t *testing.T) {
+	now := int64(1_000_000)
+	good := cacheEntry{U5: 41, U7: 7, OK: true, TS: now - 120, GoodTS: now - 120}
+
+	// éxito: refresca valor y GoodTS
+	if e := mergeProbe(good, usage.Probe{U5: 55, U7: 9, OK: true}, now); !e.OK || e.U5 != 55 || e.GoodTS != now {
+		t.Errorf("éxito debería refrescar valor y GoodTS: %+v", e)
+	}
+	// fallo reciente (< keepGoodMax): conserva el último valor bueno y su GoodTS
+	if e := mergeProbe(good, usage.Probe{OK: false}, now); !e.OK || e.U5 != 41 || e.GoodTS != good.GoodTS {
+		t.Errorf("fallo transitorio debería conservar el último valor bueno: %+v", e)
+	}
+	// fallo persistente (> keepGoodMax desde el último éxito): pasa a off
+	stale := cacheEntry{U5: 41, U7: 7, OK: true, TS: now - 30, GoodTS: now - int64(keepGoodMax.Seconds()) - 1}
+	if e := mergeProbe(stale, usage.Probe{OK: false}, now); e.OK {
+		t.Errorf("valor bueno caducado debería mostrarse off: %+v", e)
+	}
+	// entrada legada sin GoodTS: usa TS como fecha del último éxito
+	legacy := cacheEntry{U5: 41, OK: true, TS: now - 60}
+	if e := mergeProbe(legacy, usage.Probe{OK: false}, now); !e.OK || e.GoodTS != legacy.TS {
+		t.Errorf("entrada legada debería caducar según su TS: %+v", e)
+	}
+	// sin entrada previa y fallo: off
+	if e := mergeProbe(cacheEntry{}, usage.Probe{OK: false}, now); e.OK {
+		t.Errorf("fallo sin histórico debería ser off: %+v", e)
 	}
 }
 

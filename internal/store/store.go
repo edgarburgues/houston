@@ -63,6 +63,16 @@ func LoadFrom(d string) (*Store, error) {
 	return s, nil
 }
 
+// writeAtomic writes b via a same-dir temp file + rename so a crash mid-write
+// can't leave a truncated store.json / .prog manifest behind.
+func writeAtomic(path string, b []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func (s *Store) saveMeta() error {
 	b, err := json.MarshalIndent(struct {
 		Meta map[string]model.Meta `json:"meta"`
@@ -70,7 +80,7 @@ func (s *Store) saveMeta() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.dir, "store.json"), b, 0o644)
+	return writeAtomic(filepath.Join(s.dir, "store.json"), b)
 }
 
 func progFile(dir, name string) string {
@@ -88,7 +98,7 @@ func (s *Store) saveProgram(p model.Program) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(progFile(s.dir, p.Name), b, 0o644)
+	return writeAtomic(progFile(s.dir, p.Name), b)
 }
 
 // --- meta mutations ---

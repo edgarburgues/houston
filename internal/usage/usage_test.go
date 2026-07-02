@@ -39,6 +39,34 @@ func TestWeightedPressure(t *testing.T) {
 	}
 }
 
+func TestSaturationGuardUsesAbsoluteTime(t *testing.T) {
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	full7 := now.Add(win7d)
+	// 5h saturado con reset a 2 h vista: inutilizable AHORA aunque el blend
+	// ponderado lo diluiría (f5≈0.4 → ~34) — el guard debe imponerse.
+	if got := weightedPressure(95, 10, now.Add(2*time.Hour), full7, now); got != 95 {
+		t.Errorf("saturado a 2h del reset debería dominar con 95, dio %.1f", got)
+	}
+	// 5h saturado pero reset en 10 min (< gracia): libera enseguida, se permite
+	// promediar por debajo del valor saturado.
+	if got := weightedPressure(95, 10, now.Add(10*time.Minute), full7, now); got >= saturated {
+		t.Errorf("saturado a punto de reset no debería dominar, dio %.1f", got)
+	}
+}
+
+func TestProbeTokenEmptyFailsFast(t *testing.T) {
+	// Una cuenta sin login no tiene credencial: debe fallar sin red (y sin
+	// esperar el timeout) en vez de enviar un Bearer vacío condenado al 401.
+	start := time.Now()
+	_, _, _, _, err := ProbeToken("", 8*time.Second)
+	if err == nil {
+		t.Fatal("token vacío debería devolver error")
+	}
+	if time.Since(start) > time.Second {
+		t.Error("el fallo con token vacío debería ser inmediato")
+	}
+}
+
 func TestRemainingFractionClamps(t *testing.T) {
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
 	if f := remainingFraction(now.Add(-time.Hour), now, win5h); f != 0 {

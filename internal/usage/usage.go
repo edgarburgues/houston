@@ -48,8 +48,14 @@ type usageResp struct {
 	SevenDay usageWindow `json:"seven_day"`
 }
 
-// ProbeToken queries usage for a single token.
+// ProbeToken queries usage for a single token. An empty token (a dir that was
+// never logged in) fails fast instead of firing a doomed request with an empty
+// bearer — one per account per probe otherwise: the run table, `account ls`
+// and every statusline render with a stale cache.
 func ProbeToken(token string, timeout time.Duration) (u5, u7 float64, r5, r7 time.Time, err error) {
+	if token == "" {
+		return 0, 0, time.Time{}, time.Time{}, fmt.Errorf("sin credencial (cuenta sin login)")
+	}
 	req, _ := http.NewRequest(http.MethodGet, usageURL, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("anthropic-beta", usageBeta)
@@ -106,14 +112,28 @@ func remainingFraction(reset, now time.Time, period time.Duration) float64 {
 // window you literally can't use the account right now, regardless of a roomy 7d.
 const saturated = 90.0
 
+// saturationGrace: a saturated window whose reset is at most this far away is
+// about to free up, so the blend may still average it down. Anything further
+// out is a hard blocker RIGHT NOW. Absolute time, not a fraction of the period:
+// half of the 5h window is 2.5 h — far too long to count as "about to reset".
+const saturationGrace = 15 * time.Minute
+
+// blockedFor reports whether a saturated window keeps the account unusable
+// beyond the grace period. Unknown reset (zero time) is not treated as blocked,
+// consistent with the blend giving it no weight.
+func blockedFor(reset, now time.Time) bool {
+	return !reset.IsZero() && reset.Sub(now) > saturationGrace
+}
+
 // weightedPressure blends the 5h and 7d utilizations, weighting each by how much
 // of its period is still left before it resets (a window about to reset barely
 // counts; one far from reset counts fully). Falls back to max(u5,u7) when neither
 // reset time is known.
 //
-// Guard: a window that is both saturated AND not about to reset is a real
-// bottleneck, so the blend can't average it away below its own value — otherwise
-// an account maxed on 5h (unusable now) but idle on 7d could outrank a steady one.
+// Guard: a window that is both saturated AND not resetting within
+// saturationGrace is a real bottleneck, so the blend can't average it away
+// below its own value — otherwise an account maxed on 5h (unusable now) but
+// idle on 7d could outrank a steady one.
 func weightedPressure(u5, u7 float64, r5, r7, now time.Time) float64 {
 	f5 := remainingFraction(r5, now, win5h)
 	f7 := remainingFraction(r7, now, win7d)
@@ -123,10 +143,10 @@ func weightedPressure(u5, u7 float64, r5, r7, now time.Time) float64 {
 	} else {
 		p = (f5*u5 + f7*u7) / (f5 + f7)
 	}
-	if f5 > 0.5 && u5 >= saturated {
+	if u5 >= saturated && blockedFor(r5, now) {
 		p = max(p, u5)
 	}
-	if f7 > 0.5 && u7 >= saturated {
+	if u7 >= saturated && blockedFor(r7, now) {
 		p = max(p, u7)
 	}
 	return p

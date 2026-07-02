@@ -223,11 +223,41 @@ func Render(rows []row, model string, ctxPct *float64) string {
 
 // --- cached probe ----------------------------------------------------------
 
+// keepGoodMax is how long a last-known-good value survives consecutive probe
+// failures before the account shows as off. It bridges transient 429s from
+// probing too often without freezing a stale percentage forever after a
+// logout or a revoked token.
+const keepGoodMax = 10 * time.Minute
+
 type cacheEntry struct {
-	U5 float64 `json:"u5"`
-	U7 float64 `json:"u7"`
-	OK bool    `json:"ok"`
-	TS int64   `json:"ts"` // unix seconds
+	U5     float64 `json:"u5"`
+	U7     float64 `json:"u7"`
+	OK     bool    `json:"ok"`
+	TS     int64   `json:"ts"`               // unix seconds of the last probe attempt
+	GoodTS int64   `json:"goodTs,omitempty"` // unix seconds of the last SUCCESSFUL probe
+}
+
+// goodTS is when an entry's value was actually probed OK. Cache files written
+// before the GoodTS field existed fall back to the entry's write time.
+func goodTS(e cacheEntry) int64 {
+	if e.GoodTS != 0 {
+		return e.GoodTS
+	}
+	return e.TS
+}
+
+// mergeProbe folds a fresh probe result over the previous cache entry (zero
+// value if none): a success refreshes the value and its GoodTS; a failure keeps
+// the last-known-good value only while it's younger than keepGoodMax, and shows
+// the account as off after that.
+func mergeProbe(prev cacheEntry, p usage.Probe, now int64) cacheEntry {
+	if p.OK {
+		return cacheEntry{U5: p.U5, U7: p.U7, OK: true, TS: now, GoodTS: now}
+	}
+	if prev.OK && now-goodTS(prev) <= int64(keepGoodMax.Seconds()) {
+		return cacheEntry{U5: prev.U5, U7: prev.U7, OK: true, TS: now, GoodTS: goodTS(prev)}
+	}
+	return cacheEntry{TS: now}
 }
 
 func cachePath() string { return filepath.Join(accounts.StoreDir(), "usage-cache.json") }
@@ -252,16 +282,7 @@ func cachedProbes(accs []accounts.Account) map[string]usage.Probe {
 	if stale && len(accs) > 0 {
 		fresh := map[string]cacheEntry{}
 		for _, p := range usage.ProbeAll(accs, probeTimeout) {
-			if !p.OK {
-				// Keep the last-known-good value through a transient failure (e.g. an
-				// HTTP 429 from probing too often) instead of blanking the account.
-				// New timestamp so we don't immediately re-probe and 429 again.
-				if prev, ok := cache[p.Account.ID]; ok && prev.OK {
-					fresh[p.Account.ID] = cacheEntry{U5: prev.U5, U7: prev.U7, OK: true, TS: now}
-					continue
-				}
-			}
-			fresh[p.Account.ID] = cacheEntry{U5: p.U5, U7: p.U7, OK: p.OK, TS: now}
+			fresh[p.Account.ID] = mergeProbe(cache[p.Account.ID], p, now)
 		}
 		cache = fresh
 		writeCache(cache)

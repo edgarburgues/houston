@@ -149,7 +149,8 @@ func clip(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	r := []rune(strings.ReplaceAll(s, "\t", " "))
+	s = strings.ReplaceAll(s, "\t", " ") // replace in the result too, not just for measuring
+	r := []rune(s)
 	if len(r) <= w {
 		return s
 	}
@@ -184,6 +185,19 @@ func (m *Model) rebuildLeft() {
 	if m.leftCur >= len(m.left) {
 		m.leftCur = len(m.left) - 1
 	}
+	if m.leftCur < 0 {
+		m.leftCur = 0
+	}
+}
+
+// curLeft returns the selected left-pane item. Keys can arrive before the first
+// WindowSizeMsg has built the pane, so callers handle !ok instead of indexing
+// an empty slice.
+func (m *Model) curLeft() (leftItem, bool) {
+	if m.leftCur >= 0 && m.leftCur < len(m.left) {
+		return m.left[m.leftCur], true
+	}
+	return leftItem{}, false
 }
 
 func (m *Model) match(ms model.Mission) bool {
@@ -202,7 +216,10 @@ func (m *Model) match(ms model.Mission) bool {
 }
 
 func (m *Model) rebuildMid() {
-	cur := m.left[m.leftCur]
+	cur, ok := m.curLeft()
+	if !ok {
+		return
+	}
 	var out []model.Mission
 	switch cur.kind {
 	case lkProgram:
@@ -456,7 +473,7 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.startInput(actNewProgram, "Nuevo programa: ")
 	case "x":
 		// remove from current program
-		if cur := m.left[m.leftCur]; cur.kind == lkProgram {
+		if cur, ok := m.curLeft(); ok && cur.kind == lkProgram {
 			if ms, ok := m.selected(); ok {
 				if !m.noteSaveErr(m.st.RemoveFromProgram(cur.prog, ms.Key())) {
 					m.status = "quitada del programa " + cur.prog
@@ -728,26 +745,36 @@ func (m Model) viewMid() string {
 		meta := m.st.MetaOf(ms.Key())
 		pin := " "
 		if meta.Pinned {
-			pin = pinStyle.Render("★")
+			pin = "★"
 		}
-		date := "      "
+		date := "     "
 		if !ms.LastTime.IsZero() {
 			date = ms.LastTime.Local().Format("01-02")
 		}
-		tagMark := ""
+		tag := ""
 		if len(meta.Tags) > 0 {
-			tagMark = tagStyle.Render(" #")
+			tag = " #"
 		}
-		title := ms.Title
+		id := shortID(ms.ID, 6)
+		// Clip the plain title FIRST and style each segment afterwards: clip()
+		// counts runes, so a pre-styled string would get its ANSI escapes counted
+		// — and a cut mid-sequence bleeds color into the rest of the pane. The
+		// tag mark is budgeted in so the row never overflows the pane and wraps.
+		title := clip(ms.Title, w-len([]rune(pin+" "+date+" "+id+"  "))-len([]rune(tag)))
+		if i == m.midCur && m.focus == focusMid {
+			lines = append(lines, selStyle.Width(w).Render(pin+" "+date+" "+id+"  "+title+tag))
+			continue
+		}
 		if meta.Archived {
 			title = dimStyle.Render(title)
 		}
-		raw := fmt.Sprintf("%s %s %s  %s", pin, dimStyle.Render(date), shortID(ms.ID, 6), title)
-		line := clip(stripAndPad(raw, w), w) + tagMark
-		if i == m.midCur && m.focus == focusMid {
-			line = selStyle.Width(w).Render(clip(fmt.Sprintf("%s %s %s  %s", pin, date, shortID(ms.ID, 6), ms.Title), w))
+		if pin == "★" {
+			pin = pinStyle.Render(pin)
 		}
-		lines = append(lines, line)
+		if tag != "" {
+			tag = tagStyle.Render(tag)
+		}
+		lines = append(lines, pin+" "+dimStyle.Render(date)+" "+id+"  "+title+tag)
 	}
 	if len(m.mid) == 0 {
 		lines = append(lines, dimStyle.Render("(sin misiones)"))
@@ -777,9 +804,6 @@ func padBox(lines []string, h int) string {
 	}
 	return strings.Join(lines, "\n")
 }
-
-// stripAndPad is a no-op placeholder kept for clarity (styling already applied).
-func stripAndPad(s string, w int) string { return s }
 
 func windowBounds(cur, n, h int) (int, int) {
 	if n <= h {
