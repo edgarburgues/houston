@@ -11,14 +11,14 @@ import (
 	"sort"
 	"strings"
 
+	"houston/internal/accounts"
 	"houston/internal/model"
 )
 
-// Dir is where Houston keeps its data, alongside its accounts store.
-func Dir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "houston")
-}
+// Dir is where Houston keeps its data. It delegates to accounts.StoreDir so
+// every Houston store (accounts.json, store.json, programs, exports, caches)
+// honors $HOUSTON_HOME consistently instead of splitting across two dirs.
+func Dir() string { return accounts.StoreDir() }
 
 type Store struct {
 	dir      string
@@ -63,14 +63,29 @@ func LoadFrom(d string) (*Store, error) {
 	return s, nil
 }
 
-// writeAtomic writes b via a same-dir temp file + rename so a crash mid-write
-// can't leave a truncated store.json / .prog manifest behind.
+// writeAtomic writes b via a uniquely-named same-dir temp file + rename so a
+// crash mid-write can't leave a truncated store.json / .prog behind, and two
+// concurrent TUIs can't interleave writes into the same temp file.
 func writeAtomic(path string, b []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	name := tmp.Name()
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 func (s *Store) saveMeta() error {
@@ -83,13 +98,30 @@ func (s *Store) saveMeta() error {
 	return writeAtomic(filepath.Join(s.dir, "store.json"), b)
 }
 
+// windowsReserved are device names Windows refuses as a file stem — with or
+// without an extension ("CON.prog" is as invalid as "CON").
+var windowsReserved = map[string]bool{
+	"CON": true, "PRN": true, "AUX": true, "NUL": true,
+	"COM1": true, "COM2": true, "COM3": true, "COM4": true, "COM5": true,
+	"COM6": true, "COM7": true, "COM8": true, "COM9": true,
+	"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true, "LPT5": true,
+	"LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+}
+
 func progFile(dir, name string) string {
 	safe := strings.Map(func(r rune) rune {
-		if strings.ContainsRune(`<>:"/\|?*`, r) {
+		if strings.ContainsRune(`<>:"/\|?*`, r) || r < 32 {
 			return '_'
 		}
 		return r
 	}, name)
+	// Windows silently drops trailing dots/spaces ("foo." collides with "foo"),
+	// and refuses reserved device stems outright.
+	safe = strings.TrimRight(safe, ". ")
+	stem := strings.ToUpper(strings.SplitN(safe, ".", 2)[0])
+	if safe == "" || windowsReserved[stem] {
+		safe = "_" + safe
+	}
 	return filepath.Join(dir, "programs", safe+".prog")
 }
 

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"houston/internal/accounts"
+	"houston/internal/flock"
 	"houston/internal/oauth"
 )
 
@@ -169,15 +170,35 @@ func expiredMs(ms int64, now time.Time) bool {
 	return ms != 0 && now.UnixMilli() > ms-margin
 }
 
-// refreshAndSave renews an account's access token from its refresh token and
-// persists the result to the account's .credentials.json BEFORE returning it:
-// the endpoint may rotate the refresh token, and a rotated token that never
-// hits disk strands the account (next refresh would use a dead token).
-func refreshAndSave(a accounts.Account, refreshToken string, timeout time.Duration) (string, error) {
-	if refreshToken == "" {
+// refreshLockWait caps how long a probe waits for another process's refresh of
+// the same account before giving up this round (the next render/probe retries).
+const refreshLockWait = 10 * time.Second
+
+// refreshAndSave renews an account's access token and persists the result to
+// .credentials.json BEFORE returning it: the endpoint may rotate the refresh
+// token, and a rotated token that never hits disk strands the account.
+//
+// The whole cycle is serialized across processes with a per-account lock, and
+// the credential is RE-READ under the lock: statusline renders, `houston run`
+// and the TUI can all hit an expiry at once, and Claude Code itself refreshes
+// this very file. If someone else already minted a fresh token, it's reused
+// instead of burning the (single-use, rotating) refresh token again — the
+// access token is used until it truly lapses and refreshed exactly once.
+// staleToken is the access token the caller found expired or rejected.
+func refreshAndSave(a accounts.Account, staleToken string, timeout time.Duration, now time.Time) (string, error) {
+	lk, err := flock.Acquire(a.LockPath(), refreshLockWait)
+	if err != nil {
+		return "", fmt.Errorf("credencial en uso por otro proceso: %w", err)
+	}
+	defer lk.Release()
+	c, ok := a.Credential()
+	if ok && c.AccessToken != "" && c.AccessToken != staleToken && !expiredMs(c.ExpiresAt, now) {
+		return c.AccessToken, nil // freshly refreshed by another process: reuse
+	}
+	if c.RefreshToken == "" {
 		return "", fmt.Errorf("token caducado y sin refresh token — re-login: houston run -a %s", a.ID)
 	}
-	t, err := oauth.Refresh(refreshToken, timeout)
+	t, err := oauth.Refresh(c.RefreshToken, timeout)
 	if err != nil {
 		return "", fmt.Errorf("refresh rechazado (¿revocado/caducado? re-login: houston run -a %s): %w", a.ID, err)
 	}
@@ -199,7 +220,7 @@ func probeAccount(a accounts.Account, timeout time.Duration, now time.Time) Prob
 	}
 	token, refreshed := c.AccessToken, false
 	if expiredMs(c.ExpiresAt, now) {
-		t, err := refreshAndSave(a, c.RefreshToken, timeout)
+		t, err := refreshAndSave(a, c.AccessToken, timeout, now)
 		if err != nil {
 			p.Err = err.Error()
 			return p
@@ -209,8 +230,10 @@ func probeAccount(a accounts.Account, timeout time.Duration, now time.Time) Prob
 	u5, u7, r5, r7, err := ProbeToken(token, timeout)
 	if errors.Is(err, errUnauthorized) && !refreshed {
 		// expiresAt said the token was still valid but the endpoint rejects it
-		// (revoked by a re-login or an external refresh): one refresh + retry.
-		if t, rerr := refreshAndSave(a, c.RefreshToken, timeout); rerr == nil {
+		// (rotated by another process / Claude Code, or revoked): one refresh —
+		// refreshAndSave re-reads the file first and reuses an externally
+		// refreshed token — then retry.
+		if t, rerr := refreshAndSave(a, token, timeout, now); rerr == nil {
 			u5, u7, r5, r7, err = ProbeToken(t, timeout)
 		}
 	}

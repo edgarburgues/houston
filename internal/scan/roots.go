@@ -64,10 +64,12 @@ func ScanAll() ([]model.Mission, error) {
 	if len(roots) == 0 {
 		roots = []string{filepath.Join(home(), ".claude", "projects")}
 	}
+	cache := LoadCache()
+	defer cache.Save()
 	seen := map[string]bool{}
 	var all []model.Mission
 	for _, r := range roots {
-		ms, err := Scan(r)
+		ms, err := scanRoot(r, cache)
 		if err != nil {
 			continue
 		}

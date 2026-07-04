@@ -93,6 +93,9 @@ type Model struct {
 	accProbes  map[string]usage.Probe
 	accCur     int
 	accProbing bool
+	// pendingDelete arms the two-step account delete: the id whose removal the
+	// next d/x press confirms. Any other key disarms it.
+	pendingDelete string
 }
 
 type accProbeMsg struct{ probes []usage.Probe }
@@ -359,7 +362,11 @@ func (m Model) curAccount() (accounts.Account, bool) {
 }
 
 func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	key := msg.String()
+	if key != "d" && key != "x" {
+		m.pendingDelete = "" // any other key disarms a pending delete
+	}
+	switch key {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "esc", "A", "tab":
@@ -378,8 +385,19 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, probeAccountsCmd(m.accs)
 		}
 	case "d", "x":
+		// Two-step: one stray keypress must not drop an account ('x' even means
+		// something else on the missions screen).
 		if a, ok := m.curAccount(); ok {
-			_ = accounts.Remove(a.ID)
+			if m.pendingDelete != a.ID {
+				m.pendingDelete = a.ID
+				m.status = "¿eliminar la cuenta " + a.ID + "? pulsa d/x otra vez para confirmar"
+				return m, nil
+			}
+			m.pendingDelete = ""
+			if err := accounts.Remove(a.ID); err != nil {
+				m.status = "no pude eliminar: " + err.Error()
+				return m, nil
+			}
 			m.accs, _ = accounts.Load()
 			if m.accCur >= len(m.accs) {
 				m.accCur = len(m.accs) - 1
@@ -832,8 +850,10 @@ func safeName(title, id string) string {
 		return r
 	}, title)
 	s = strings.TrimSpace(s)
-	if len(s) > 50 {
-		s = s[:50]
+	// Truncate by runes, not bytes: a byte slice can split a multi-byte rune
+	// (accents, emoji) and yield an invalid-UTF-8 filename.
+	if r := []rune(s); len(r) > 50 {
+		s = string(r[:50])
 	}
 	// shortID, not id[:8]: ids aren't guaranteed 36-char UUIDs (a legacy/hand-copied
 	// "ab.jsonl" gives a 2-char id), and a raw slice would panic on export.

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"houston/internal/accounts"
+	"houston/internal/flock"
 	"houston/internal/usage"
 )
 
@@ -72,8 +73,8 @@ func Line(r io.Reader, configDir string) string {
 	if b, err := io.ReadAll(r); err == nil {
 		_ = json.Unmarshal(b, &in)
 	}
-	active := accountID(configDir)
 	accs, _ := accounts.Load()
+	active := activeID(accs, configDir)
 
 	probes := cachedProbes(accs)
 	rows := make([]row, 0, len(accs))
@@ -280,12 +281,20 @@ func cachedProbes(accs []accounts.Account) map[string]usage.Probe {
 		}
 	}
 	if stale && len(accs) > 0 {
-		fresh := map[string]cacheEntry{}
-		for _, p := range usage.ProbeAll(accs, probeTimeout) {
-			fresh[p.Account.ID] = mergeProbe(cache[p.Account.ID], p, now)
+		// Single-flight across processes: with several Claude sessions open every
+		// one renders a status line, and the moment the cache goes stale they'd
+		// all probe (and possibly refresh tokens) at once. Whoever wins the lock
+		// probes; the rest serve the previous cache — it refreshes momentarily.
+		_ = os.MkdirAll(filepath.Dir(cachePath()), 0o700)
+		if lk, ok := flock.TryAcquire(cachePath() + ".lock"); ok {
+			fresh := map[string]cacheEntry{}
+			for _, p := range usage.ProbeAll(accs, probeTimeout) {
+				fresh[p.Account.ID] = mergeProbe(cache[p.Account.ID], p, now)
+			}
+			cache = fresh
+			writeCache(cache)
+			lk.Release()
 		}
-		cache = fresh
-		writeCache(cache)
 	}
 	out := map[string]usage.Probe{}
 	for id, e := range cache {
@@ -303,13 +312,44 @@ func writeCache(c map[string]cacheEntry) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return
 	}
-	tmp := p + ".tmp"
-	if os.WriteFile(tmp, b, 0o600) == nil {
-		_ = os.Rename(tmp, p)
+	// Uniquely-named temp + rename: a fixed ".tmp" name can interleave between
+	// two writers and rename corrupted bytes into place.
+	tmp, err := os.CreateTemp(filepath.Dir(p), "usage-cache-*.tmp")
+	if err != nil {
+		return
+	}
+	name := tmp.Name()
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return
+	}
+	if tmp.Close() != nil {
+		os.Remove(name)
+		return
+	}
+	if os.Rename(name, p) != nil {
+		os.Remove(name)
 	}
 }
 
 // --- helpers ---------------------------------------------------------------
+
+// activeID resolves which account owns configDir: an exact config-dir match
+// first (this also covers accounts with a custom ConfigDir, whose basename
+// isn't "account-<id>"), then the basename heuristic as fallback.
+func activeID(accs []accounts.Account, configDir string) string {
+	if configDir == "" {
+		return ""
+	}
+	want := filepath.Clean(configDir)
+	for _, a := range accs {
+		if cd := a.ResolveConfigDir(); cd != "" && strings.EqualFold(filepath.Clean(cd), want) {
+			return a.ID
+		}
+	}
+	return accountID(configDir)
+}
 
 // accountID derives the short account id from the config dir basename
 // (".../account-work2" → "work2"). Returns "" for the default ~/.claude dir.

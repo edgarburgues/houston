@@ -37,10 +37,12 @@ func Mission(m model.Mission, outPath string) (string, error) {
 	}
 	defer in.Close()
 
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o700); err != nil {
 		return "", err
 	}
-	out, err := os.Create(outPath)
+	// 0600: transcripts routinely contain secrets (keys pasted into prompts,
+	// tool output); don't hand them to every local user via default perms.
+	out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return "", err
 	}

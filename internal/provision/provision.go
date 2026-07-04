@@ -13,9 +13,7 @@ package provision
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"houston/internal/accounts"
@@ -270,16 +268,6 @@ func sameTarget(link, target string) bool {
 		return strings.EqualFold(filepath.Clean(strings.TrimPrefix(t, `\??\`)), filepath.Clean(target))
 	}
 	return false
-}
-
-// makeLink creates a directory link at link pointing to target: a junction on
-// Windows (no admin needed) or a symlink elsewhere.
-func makeLink(link, target string) error {
-	if runtime.GOOS == "windows" {
-		// mklink /J <link> <target> — directory junction, no privilege required.
-		return exec.Command("cmd", "/c", "mklink", "/J", link, target).Run()
-	}
-	return os.Symlink(target, link)
 }
 
 // seedConfigJSON builds the .claude.json template: the user's ~/.claude.json

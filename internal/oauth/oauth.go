@@ -65,10 +65,17 @@ func Refresh(refreshToken string, timeout time.Duration) (Tokens, error) {
 	if r.AccessToken == "" {
 		return Tokens{}, fmt.Errorf("refresh sin access_token en la respuesta")
 	}
+	exp := r.ExpiresIn
+	if exp <= 0 {
+		// Missing/zero expires_in would mark the token as already expired and
+		// every probe would refresh again (a refresh storm). Assume a modest
+		// lifetime; a premature 401 is handled by the probe's retry path anyway.
+		exp = 3600
+	}
 	t := Tokens{
 		AccessToken:  r.AccessToken,
 		RefreshToken: r.RefreshToken,
-		ExpiresAt:    time.Now().Add(time.Duration(r.ExpiresIn) * time.Second).UnixMilli(),
+		ExpiresAt:    time.Now().Add(time.Duration(exp) * time.Second).UnixMilli(),
 	}
 	if t.RefreshToken == "" {
 		t.RefreshToken = refreshToken // no rotó: conserva el actual

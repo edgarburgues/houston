@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"houston/internal/flock"
 )
 
 type Account struct {
@@ -143,15 +145,49 @@ func (a Account) SaveTokens(access, refresh string, expiresAt int64) error {
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return writeFileAtomic(p, out, 0o600)
 }
 
 func (a Account) credentialsPath() string {
 	return filepath.Join(a.ResolveConfigDir(), ".credentials.json")
+}
+
+// LockPath is the advisory lock (see internal/flock) that serializes refreshes
+// of this account's credential across processes: statusline renders, `houston
+// run` and the TUI can all hit an expired token at once, and refresh tokens
+// rotate — concurrent refreshes can strand the account.
+func (a Account) LockPath() string {
+	return a.credentialsPath() + ".lock"
+}
+
+// writeFileAtomic writes b via a uniquely-named same-dir temp file + rename.
+// The unique name matters as much as the rename: two processes writing the
+// same fixed ".tmp" path can interleave and rename corrupted bytes into place.
+func writeFileAtomic(p string, b []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(p), "."+filepath.Base(p)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, p); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // StoreDir is Houston's own data dir, kept stable regardless of
@@ -183,7 +219,7 @@ func Load() ([]Account, error) {
 	return a, nil
 }
 
-// Save writes accounts with 0600 perms (tokens are secrets).
+// Save writes accounts atomically with 0600 perms.
 func Save(a []Account) error {
 	p := storePath()
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
@@ -193,11 +229,19 @@ func Save(a []Account) error {
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return writeFileAtomic(p, b, 0o600)
+}
+
+// registryLockWait caps how long a registry mutation waits for the lock; these
+// are read-modify-write cycles over a small JSON file, so contention is brief.
+const registryLockWait = 3 * time.Second
+
+// lockRegistry serializes Load-modify-Save cycles on accounts.json across
+// processes (two `houston run` in parallel, statusline + TUI, ...): without it
+// concurrent writers lose each other's updates.
+func lockRegistry() (*flock.Lock, error) {
+	_ = os.MkdirAll(StoreDir(), 0o700)
+	return flock.Acquire(storePath()+".lock", registryLockWait)
 }
 
 func slug(label string) string {
@@ -218,6 +262,11 @@ func slug(label string) string {
 // Add stores a new account. now is passed in (callers stamp time) to keep this
 // testable. Returns the created account.
 func Add(label, now string) (Account, error) {
+	lk, err := lockRegistry()
+	if err != nil {
+		return Account{}, err
+	}
+	defer lk.Release()
 	list, err := Load()
 	if err != nil {
 		return Account{}, err
@@ -234,6 +283,11 @@ func Add(label, now string) (Account, error) {
 
 // Remove deletes the account with the given id.
 func Remove(id string) error {
+	lk, err := lockRegistry()
+	if err != nil {
+		return err
+	}
+	defer lk.Release()
 	list, err := Load()
 	if err != nil {
 		return err
@@ -247,8 +301,14 @@ func Remove(id string) error {
 	return Save(out)
 }
 
-// TouchUse records that an account was just launched.
+// TouchUse records that an account was just launched. Best-effort: a busy
+// lock or unreadable registry only loses the LastUse stamp.
 func TouchUse(id, now string) {
+	lk, err := lockRegistry()
+	if err != nil {
+		return
+	}
+	defer lk.Release()
 	list, err := Load()
 	if err != nil {
 		return

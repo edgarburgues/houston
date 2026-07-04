@@ -127,29 +127,41 @@ func cmdRun(args []string) {
 		fmt.Fprintln(os.Stderr, "houston: no hay cuentas; añade una con 'houston account add'")
 		os.Exit(1)
 	}
-	forcedID, rest := extractAccountFlag(args)
-	best, probes, err := usage.Best(accs, 8*time.Second)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "houston:", err)
+	forcedID, rest, dangling := extractAccountFlag(args)
+	if dangling {
+		fmt.Fprintln(os.Stderr, "houston: -a/--account requiere un id de cuenta")
 		os.Exit(1)
 	}
-	switch {
-	case forcedID != "":
+	if forcedID != "" {
+		// Forced account: no balancing decision to make, so skip the usage probe
+		// (multi-second wait) and launch straight away.
 		a, ok := findAccount(accs, forcedID)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "houston: no existe la cuenta %q\n", forcedID)
 			os.Exit(1)
 		}
-		best = a
-	default:
-		// While any account isn't logged in yet, target it first so `houston run`
-		// walks the user through logging in each one (Best only ranks accounts
-		// whose usage probe succeeds, so un-logged-in ones would never be picked).
-		for _, a := range accs {
-			if !a.LoggedIn() {
-				best = a
-				break
-			}
+		fmt.Fprintf(os.Stderr, "→ lanzando: %s (forzada)\n", a.ID)
+		if !a.LoggedIn() {
+			fmt.Fprintln(os.Stderr, "  (cuenta sin login — escribe /login dentro de Claude esta primera vez)")
+		}
+		accounts.TouchUse(a.ID, accounts.Now())
+		if err := launch.Cmd(a.ResolveConfigDir(), rest, "").Run(); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	best, probes, err := usage.Best(accs, 8*time.Second)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "houston:", err)
+		os.Exit(1)
+	}
+	// While any account isn't logged in yet, target it first so `houston run`
+	// walks the user through logging in each one (Best only ranks accounts
+	// whose usage probe succeeds, so un-logged-in ones would never be picked).
+	for _, a := range accs {
+		if !a.LoggedIn() {
+			best = a
+			break
 		}
 	}
 	printAccountsTable(probes, best.ID)
@@ -171,7 +183,8 @@ func cmdRun(args []string) {
 
 // extractAccountFlag pulls an explicit account selector (-a/--account <id> or
 // --account=<id>) out of the args; everything else is passed through to claude.
-func extractAccountFlag(args []string) (id string, rest []string) {
+// dangling reports a trailing -a/--account with no id (an error, not "balance").
+func extractAccountFlag(args []string) (id string, rest []string, dangling bool) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -179,6 +192,8 @@ func extractAccountFlag(args []string) (id string, rest []string) {
 			if i+1 < len(args) {
 				id = args[i+1]
 				i++
+			} else {
+				dangling = true
 			}
 		case strings.HasPrefix(a, "--account="):
 			id = strings.TrimPrefix(a, "--account=")
@@ -186,7 +201,7 @@ func extractAccountFlag(args []string) (id string, rest []string) {
 			rest = append(rest, a)
 		}
 	}
-	return id, rest
+	return id, rest, dangling
 }
 
 func findAccount(accs []accounts.Account, id string) (accounts.Account, bool) {

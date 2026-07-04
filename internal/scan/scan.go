@@ -56,8 +56,13 @@ type contentPart struct {
 }
 
 // Scan reads every mission .jsonl under root (excluding subagent transcripts)
-// and returns the missions sorted by most-recent activity first.
-func Scan(root string) ([]model.Mission, error) {
+// and returns the missions sorted by most-recent activity first. Uncached;
+// ScanAll layers the scan cache on top.
+func Scan(root string) ([]model.Mission, error) { return scanRoot(root, nil) }
+
+// scanRoot walks one projects root, reusing cached parses for unchanged
+// transcripts when c is non-nil.
+func scanRoot(root string, c *Cache) ([]model.Mission, error) {
 	var missions []model.Mission
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -72,8 +77,14 @@ func Scan(root string) ([]model.Mission, error) {
 		if !strings.HasSuffix(path, ".jsonl") {
 			return nil
 		}
+		fi, _ := d.Info()
+		if m, ok := c.lookup(path, fi); ok {
+			missions = append(missions, m)
+			return nil
+		}
 		m, perr := parseFile(path)
 		if perr == nil && m.ID != "" {
+			c.put(path, fi, m)
 			missions = append(missions, m)
 		}
 		return nil

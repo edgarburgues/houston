@@ -13,9 +13,17 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+)
+
+// Download size caps: a hijacked or misconfigured release must not be able to
+// balloon memory via an unbounded io.ReadAll.
+const (
+	maxChecksumsBytes = 1 << 20  // checksums.txt is a handful of lines
+	maxBinaryBytes    = 1 << 28 // 256 MiB — far above any houston binary
 )
 
 // assetName is the release asset for a platform, matching the names produced by
@@ -40,7 +48,7 @@ func FetchLatest(timeout time.Duration) string { return fetchLatest(timeout) }
 // Newer reports whether tag a is strictly newer than tag b (exported wrapper).
 func Newer(a, b string) bool { return newer(a, b) }
 
-func httpGet(url string, timeout time.Duration) ([]byte, error) {
+func httpGet(url string, timeout time.Duration, maxBytes int64) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -54,7 +62,14 @@ func httpGet(url string, timeout time.Duration) ([]byte, error) {
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
 	}
-	return io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > maxBytes {
+		return nil, fmt.Errorf("response larger than %d bytes for %s", maxBytes, url)
+	}
+	return b, nil
 }
 
 // expectedSHA finds the lowercase sha256 hex for file in a checksums.txt body
@@ -75,7 +90,7 @@ func expectedSHA(checksums []byte, file string) (string, bool) {
 // name. Any mismatch or missing checksum is an error (never returns bad bytes).
 func DownloadVerified(tag string, timeout time.Duration) (bin []byte, file string, err error) {
 	file = assetName(runtime.GOOS, runtime.GOARCH)
-	sums, err := httpGet(downloadURL(tag, "checksums.txt"), timeout)
+	sums, err := httpGet(downloadURL(tag, "checksums.txt"), timeout, maxChecksumsBytes)
 	if err != nil {
 		return nil, file, fmt.Errorf("could not download checksums.txt: %w", err)
 	}
@@ -83,7 +98,7 @@ func DownloadVerified(tag string, timeout time.Duration) (bin []byte, file strin
 	if !ok {
 		return nil, file, fmt.Errorf("release %s has no checksum for %s", tag, file)
 	}
-	bin, err = httpGet(downloadURL(tag, file), timeout)
+	bin, err = httpGet(downloadURL(tag, file), timeout, maxBinaryBytes)
 	if err != nil {
 		return nil, file, fmt.Errorf("could not download %s: %w", file, err)
 	}
@@ -95,10 +110,13 @@ func DownloadVerified(tag string, timeout time.Duration) (bin []byte, file strin
 }
 
 // Swap replaces the binary at exePath with newBin. On Windows a running .exe
-// can't be overwritten, so the in-use binary is renamed aside (<exe>.old) first
-// and then the new one is moved into place; the old copy is removed if free, or
-// reported as leftover (CleanupStale collects it on a later run). On Unix the
-// replace is a single atomic rename. On any failure the original is restored.
+// can't be overwritten, so the in-use binary is renamed aside first — to a
+// UNIQUE name (<exe>.old-<nanos>), because a fixed ".old" from a previous
+// update may still be locked by a lingering session and would wedge every
+// future update — then the new one is moved into place; the old copy is
+// removed if free, or reported as leftover (CleanupStale collects it on a
+// later run). On Unix the replace is a single atomic rename. On any failure
+// the original is restored.
 func Swap(exePath string, newBin []byte) (leftover string, err error) {
 	tmp := exePath + ".new"
 	if err = os.WriteFile(tmp, newBin, 0o755); err != nil {
@@ -111,8 +129,7 @@ func Swap(exePath string, newBin []byte) (leftover string, err error) {
 		}
 		return "", nil
 	}
-	old := exePath + ".old"
-	_ = os.Remove(old) // clear a prior leftover if it's now free
+	old := fmt.Sprintf("%s.old-%d", exePath, time.Now().UnixNano())
 	if err = os.Rename(exePath, old); err != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("could not move the in-use binary aside: %w", err)
@@ -129,9 +146,21 @@ func Swap(exePath string, newBin []byte) (leftover string, err error) {
 }
 
 // CleanupStale best-effort removes binaries left aside by a previous Windows
-// update once they're no longer locked. Safe and silent to call on startup.
+// update once they're no longer locked. Matches every "<exe>.old*" so it
+// covers the unique .old-<nanos> names plus the legacy .old / .oldlocked
+// leftovers from earlier versions. Safe and silent to call on startup.
 func CleanupStale(exePath string) {
-	for _, suffix := range []string{".old", ".oldlocked"} {
-		_ = os.Remove(exePath + suffix)
+	dir, base := filepath.Split(exePath)
+	if dir == "" {
+		dir = "."
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if n := e.Name(); strings.HasPrefix(n, base+".old") {
+			_ = os.Remove(filepath.Join(dir, n))
+		}
 	}
 }
