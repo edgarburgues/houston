@@ -1,8 +1,8 @@
 name: release
 
-# Un tag v* (p.ej. v0.3.0) cross-compila los 6 binarios, genera checksums
-# SHA-256 y publica una GitHub Release con todo adjunto. El instalador descarga
-# de aquí y verifica el checksum.
+# A v* tag (e.g. v0.3.0) cross-compiles the 6 binaries, generates SHA-256
+# checksums and publishes a GitHub Release with everything attached. The
+# installer downloads from here and verifies the checksum.
 on:
   push:
     tags:

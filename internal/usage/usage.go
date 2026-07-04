@@ -61,7 +61,7 @@ var errUnauthorized = errors.New("usage HTTP 401")
 // and every statusline render with a stale cache.
 func ProbeToken(token string, timeout time.Duration) (u5, u7 float64, r5, r7 time.Time, err error) {
 	if token == "" {
-		return 0, 0, time.Time{}, time.Time{}, fmt.Errorf("sin credencial (cuenta sin login)")
+		return 0, 0, time.Time{}, time.Time{}, fmt.Errorf("no credential (account not logged in)")
 	}
 	req, _ := http.NewRequest(http.MethodGet, usageURL, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -188,7 +188,7 @@ const refreshLockWait = 10 * time.Second
 func refreshAndSave(a accounts.Account, staleToken string, timeout time.Duration, now time.Time) (string, error) {
 	lk, err := flock.Acquire(a.LockPath(), refreshLockWait)
 	if err != nil {
-		return "", fmt.Errorf("credencial en uso por otro proceso: %w", err)
+		return "", fmt.Errorf("credential busy in another process: %w", err)
 	}
 	defer lk.Release()
 	c, ok := a.Credential()
@@ -196,14 +196,14 @@ func refreshAndSave(a accounts.Account, staleToken string, timeout time.Duration
 		return c.AccessToken, nil // freshly refreshed by another process: reuse
 	}
 	if c.RefreshToken == "" {
-		return "", fmt.Errorf("token caducado y sin refresh token — re-login: houston run -a %s", a.ID)
+		return "", fmt.Errorf("token expired and no refresh token — re-login: houston run -a %s", a.ID)
 	}
 	t, err := oauth.Refresh(c.RefreshToken, timeout)
 	if err != nil {
-		return "", fmt.Errorf("refresh rechazado (¿revocado/caducado? re-login: houston run -a %s): %w", a.ID, err)
+		return "", fmt.Errorf("refresh rejected (revoked/expired? re-login: houston run -a %s): %w", a.ID, err)
 	}
 	if err := a.SaveTokens(t.AccessToken, t.RefreshToken, t.ExpiresAt); err != nil {
-		return "", fmt.Errorf("token refrescado pero no pude guardarlo: %w", err)
+		return "", fmt.Errorf("token refreshed but could not persist it: %w", err)
 	}
 	return t.AccessToken, nil
 }
@@ -215,7 +215,7 @@ func probeAccount(a accounts.Account, timeout time.Duration, now time.Time) Prob
 	p := Probe{Account: a}
 	c, ok := a.Credential()
 	if !ok {
-		p.Err = "sin credencial (cuenta sin login)"
+		p.Err = "no credential (account not logged in)"
 		return p
 	}
 	token, refreshed := c.AccessToken, false
@@ -267,7 +267,7 @@ func ProbeAll(accs []accounts.Account, timeout time.Duration) []Probe {
 // if none probe successfully, the least-recently-used account.
 func Best(accs []accounts.Account, timeout time.Duration) (accounts.Account, []Probe, error) {
 	if len(accs) == 0 {
-		return accounts.Account{}, nil, fmt.Errorf("no hay cuentas; añade una con: houston account add")
+		return accounts.Account{}, nil, fmt.Errorf("no accounts; add one with: houston account add")
 	}
 	probes := ProbeAll(accs, timeout)
 	ok := make([]Probe, 0, len(probes))

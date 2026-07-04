@@ -28,9 +28,9 @@ func TestNewer(t *testing.T) {
 func TestNoticeOnDevBuildIsSilent(t *testing.T) {
 	// dev / empty versions must never nag, even though they'd "differ" from a tag.
 	if n := Notice("dev", time.Second); n != "" {
-		t.Errorf("dev build no debería avisar: %q", n)
+		t.Errorf("dev build should never nag: %q", n)
 	}
 	if n := Notice("", time.Second); n != "" {
-		t.Errorf("versión vacía no debería avisar: %q", n)
+		t.Errorf("empty version should never nag: %q", n)
 	}
 }

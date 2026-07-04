@@ -42,15 +42,15 @@ func TestWeightedPressure(t *testing.T) {
 func TestSaturationGuardUsesAbsoluteTime(t *testing.T) {
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
 	full7 := now.Add(win7d)
-	// 5h saturado con reset a 2 h vista: inutilizable AHORA aunque el blend
-	// ponderado lo diluiría (f5≈0.4 → ~34) — el guard debe imponerse.
+	// 5h saturated with the reset 2 h away: unusable NOW even though the
+	// weighted blend would dilute it (f5≈0.4 → ~34) — the guard must win.
 	if got := weightedPressure(95, 10, now.Add(2*time.Hour), full7, now); got != 95 {
-		t.Errorf("saturado a 2h del reset debería dominar con 95, dio %.1f", got)
+		t.Errorf("saturated 2h from reset should dominate with 95, got %.1f", got)
 	}
-	// 5h saturado pero reset en 10 min (< gracia): libera enseguida, se permite
-	// promediar por debajo del valor saturado.
+	// 5h saturated but resetting in 10 min (< grace): frees up right away, so
+	// averaging below the saturated value is allowed.
 	if got := weightedPressure(95, 10, now.Add(10*time.Minute), full7, now); got >= saturated {
-		t.Errorf("saturado a punto de reset no debería dominar, dio %.1f", got)
+		t.Errorf("saturated but about to reset should not dominate, got %.1f", got)
 	}
 }
 
@@ -62,10 +62,10 @@ func TestExpiredMs(t *testing.T) {
 		exp  int64
 		want bool
 	}{
-		{"caducado hace horas", ms(now.Add(-3 * time.Hour)), true},
-		{"caduca dentro del margen (30s)", ms(now.Add(30 * time.Second)), true},
-		{"vigente con holgura", ms(now.Add(2 * time.Hour)), false},
-		{"desconocido (0): se intenta tal cual", 0, false},
+		{"expired hours ago", ms(now.Add(-3 * time.Hour)), true},
+		{"expires within the margin (30s)", ms(now.Add(30 * time.Second)), true},
+		{"valid with headroom", ms(now.Add(2 * time.Hour)), false},
+		{"unknown (0): tried as-is", 0, false},
 	}
 	for _, c := range cases {
 		if got := expiredMs(c.exp, now); got != c.want {
@@ -75,25 +75,26 @@ func TestExpiredMs(t *testing.T) {
 }
 
 func TestProbeTokenEmptyFailsFast(t *testing.T) {
-	// Una cuenta sin login no tiene credencial: debe fallar sin red (y sin
-	// esperar el timeout) en vez de enviar un Bearer vacío condenado al 401.
+	// An account without login has no credential: it must fail without the
+	// network (and without waiting the timeout) instead of sending an empty
+	// Bearer doomed to a 401.
 	start := time.Now()
 	_, _, _, _, err := ProbeToken("", 8*time.Second)
 	if err == nil {
-		t.Fatal("token vacío debería devolver error")
+		t.Fatal("empty token should return an error")
 	}
 	if time.Since(start) > time.Second {
-		t.Error("el fallo con token vacío debería ser inmediato")
+		t.Error("the empty-token failure should be immediate")
 	}
 }
 
 func TestRemainingFractionClamps(t *testing.T) {
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
 	if f := remainingFraction(now.Add(-time.Hour), now, win5h); f != 0 {
-		t.Errorf("reset en el pasado debería dar 0, dio %.3f", f)
+		t.Errorf("reset in the past should give 0, got %.3f", f)
 	}
 	if f := remainingFraction(now.Add(100*win5h), now, win5h); f != 1 {
-		t.Errorf("reset muy lejano debería clamparse a 1, dio %.3f", f)
+		t.Errorf("far-future reset should clamp to 1, got %.3f", f)
 	}
 }
 
@@ -105,10 +106,10 @@ func TestLRUFirst(t *testing.T) {
 		{ID: "c", LastUse: "2026-05-27T10:00:00Z"},
 	}
 	if got := lruFirst(accs); got.ID != "b" {
-		t.Fatalf("lruFirst debería elegir la nunca usada 'b', eligió %q", got.ID)
+		t.Fatalf("lruFirst should pick never-used 'b', picked %q", got.ID)
 	}
 	accs[1].LastUse = "2026-05-28T12:00:00Z" // with all used, oldest wins
 	if got := lruFirst(accs); got.ID != "c" {
-		t.Fatalf("lruFirst debería elegir la más antigua 'c', eligió %q", got.ID)
+		t.Fatalf("lruFirst should pick the oldest 'c', picked %q", got.ID)
 	}
 }

@@ -69,7 +69,7 @@ func cmdAccount(args []string) {
 	case "add":
 		label := strings.Join(args[1:], " ")
 		if label == "" {
-			fmt.Fprintln(os.Stderr, "uso: houston account add <etiqueta>")
+			fmt.Fprintln(os.Stderr, "usage: houston account add <label>")
 			os.Exit(1)
 		}
 		acc, err := accounts.Add(label, accounts.Now())
@@ -77,17 +77,17 @@ func cmdAccount(args []string) {
 			fmt.Fprintln(os.Stderr, "houston:", err)
 			os.Exit(1)
 		}
-		fmt.Printf("cuenta añadida: %s (%s)\n", acc.ID, acc.Label)
-		fmt.Println("siguiente: 'houston run' — la primera vez abrirá /login en el navegador para esta cuenta.")
+		fmt.Printf("account added: %s (%s)\n", acc.ID, acc.Label)
+		fmt.Println("next: 'houston run' — the first time it will open /login in the browser for this account.")
 	case "ls", "list", "":
 		accs, _ := accounts.Load()
 		if len(accs) == 0 {
-			fmt.Println("sin cuentas. Añade una:  houston account add <etiqueta>")
+			fmt.Println("no accounts yet. Add one:  houston account add <label>")
 			return
 		}
-		fmt.Fprintln(os.Stderr, "sondeando uso...")
+		fmt.Fprintln(os.Stderr, "probing usage...")
 		probes := usage.ProbeAll(accs, 8*time.Second)
-		fmt.Printf("%-16s %-30s %-8s %s\n", "ID", "EMAIL / ETIQUETA", "PRESIÓN", "5h / 7d")
+		fmt.Printf("%-16s %-30s %-8s %s\n", "ID", "EMAIL / LABEL", "PRESSURE", "5h / 7d")
 		for _, p := range probes {
 			name := p.Account.Email()
 			if name == "" {
@@ -98,23 +98,23 @@ func cmdAccount(args []string) {
 				fmt.Printf("%-16s %-30s %6.0f%%   %.0f%% / %.0f%%\n",
 					p.Account.ID, trunc(name, 30), p.Pressure, p.U5, p.U7)
 			case !p.Account.LoggedIn():
-				fmt.Printf("%-16s %-30s   (sin login todavía)\n", p.Account.ID, trunc(name, 30))
+				fmt.Printf("%-16s %-30s   (not logged in yet)\n", p.Account.ID, trunc(name, 30))
 			default:
-				fmt.Printf("%-16s %-30s   (sin uso: %s)\n", p.Account.ID, trunc(name, 30), p.Err)
+				fmt.Printf("%-16s %-30s   (no usage: %s)\n", p.Account.ID, trunc(name, 30), p.Err)
 			}
 		}
 	case "rm", "remove":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "uso: houston account rm <id>")
+			fmt.Fprintln(os.Stderr, "usage: houston account rm <id>")
 			os.Exit(1)
 		}
 		if err := accounts.Remove(args[1]); err != nil {
 			fmt.Fprintln(os.Stderr, "houston:", err)
 			os.Exit(1)
 		}
-		fmt.Println("cuenta eliminada:", args[1])
+		fmt.Println("account removed:", args[1])
 	default:
-		fmt.Fprintln(os.Stderr, "uso: houston account [add <etiqueta> | ls | rm <id>]")
+		fmt.Fprintln(os.Stderr, "usage: houston account [add <label> | ls | rm <id>]")
 		os.Exit(1)
 	}
 }
@@ -124,12 +124,12 @@ func cmdAccount(args []string) {
 func cmdRun(args []string) {
 	accs, err := accounts.Load()
 	if err != nil || len(accs) == 0 {
-		fmt.Fprintln(os.Stderr, "houston: no hay cuentas; añade una con 'houston account add'")
+		fmt.Fprintln(os.Stderr, "houston: no accounts; add one with 'houston account add'")
 		os.Exit(1)
 	}
 	forcedID, rest, dangling := extractAccountFlag(args)
 	if dangling {
-		fmt.Fprintln(os.Stderr, "houston: -a/--account requiere un id de cuenta")
+		fmt.Fprintln(os.Stderr, "houston: -a/--account requires an account id")
 		os.Exit(1)
 	}
 	if forcedID != "" {
@@ -137,12 +137,12 @@ func cmdRun(args []string) {
 		// (multi-second wait) and launch straight away.
 		a, ok := findAccount(accs, forcedID)
 		if !ok {
-			fmt.Fprintf(os.Stderr, "houston: no existe la cuenta %q\n", forcedID)
+			fmt.Fprintf(os.Stderr, "houston: no such account %q\n", forcedID)
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "→ lanzando: %s (forzada)\n", a.ID)
+		fmt.Fprintf(os.Stderr, "→ launching: %s (forced)\n", a.ID)
 		if !a.LoggedIn() {
-			fmt.Fprintln(os.Stderr, "  (cuenta sin login — escribe /login dentro de Claude esta primera vez)")
+			fmt.Fprintln(os.Stderr, "  (account not logged in — type /login inside Claude this first time)")
 		}
 		accounts.TouchUse(a.ID, accounts.Now())
 		if err := launch.Cmd(a.ResolveConfigDir(), rest, "").Run(); err != nil {
@@ -169,12 +169,12 @@ func cmdRun(args []string) {
 		fmt.Fprintln(os.Stderr, "houston: "+n)
 	}
 	if !best.LoggedIn() {
-		fmt.Fprintln(os.Stderr, "  (cuenta sin login — escribe /login dentro de Claude esta primera vez)")
+		fmt.Fprintln(os.Stderr, "  (account not logged in — type /login inside Claude this first time)")
 	}
 	accounts.TouchUse(best.ID, accounts.Now())
-	// No inyectamos el token: la identidad (y el email) viene del login propio de
-	// la carpeta de la cuenta (CLAUDE_CONFIG_DIR). El token solo se usa arriba para
-	// sondear la carga. La primera vez por cuenta, claude pedirá login una vez.
+	// No token injection: identity (and the email) comes from the account dir's
+	// own login (CLAUDE_CONFIG_DIR). The token is only used above to probe load.
+	// The first time per account, claude asks to log in once.
 	cmd := launch.Cmd(best.ResolveConfigDir(), rest, "")
 	if err := cmd.Run(); err != nil {
 		os.Exit(1)
@@ -216,7 +216,7 @@ func findAccount(accs []accounts.Account, id string) (accounts.Account, bool) {
 // printAccountsTable shows every account with its email + current usage before
 // handing the terminal to claude, marking (→) the one being launched.
 func printAccountsTable(probes []usage.Probe, bestID string) {
-	fmt.Fprintln(os.Stderr, "Cuentas Claude — uso (5h / 7d):")
+	fmt.Fprintln(os.Stderr, "Claude accounts — usage (5h / 7d):")
 	for _, p := range probes {
 		mark := "  "
 		if p.Account.ID == bestID {
@@ -224,7 +224,7 @@ func printAccountsTable(probes []usage.Probe, bestID string) {
 		}
 		email := p.Account.Email()
 		if email == "" {
-			email = "(sin login todavía)"
+			email = "(not logged in yet)"
 		}
 		use := "    —  /   —"
 		if p.OK {
@@ -240,9 +240,9 @@ func printAccountsTable(probes []usage.Probe, bestID string) {
 			}
 		}
 	}
-	fmt.Fprintf(os.Stderr, "→ lanzando: %s%s\n", bestID, be)
-	// Una pausa breve para leer la tabla antes de que claude pinte la pantalla.
-	// Con una sola cuenta no hay nada que comparar, así que no esperamos.
+	fmt.Fprintf(os.Stderr, "→ launching: %s%s\n", bestID, be)
+	// A brief pause to read the table before claude paints the screen. With a
+	// single account there is nothing to compare, so no wait.
 	if len(probes) > 1 {
 		time.Sleep(700 * time.Millisecond)
 	}
@@ -370,28 +370,28 @@ func cmdDoctor(args []string) {
 	}
 	accs, _ := accounts.Load()
 	if len(accs) == 0 {
-		fmt.Fprintln(os.Stderr, "houston: no hay cuentas; añade una con 'houston account add'")
+		fmt.Fprintln(os.Stderr, "houston: no accounts; add one with 'houston account add'")
 		os.Exit(1)
 	}
 
 	sharedMissing, reports := provision.Audit(accs)
-	fmt.Printf("Store compartido: %s\n", provision.SharedDir())
+	fmt.Printf("Shared store: %s\n", provision.SharedDir())
 	if len(sharedMissing) > 0 {
-		fmt.Printf("  faltan dirs: %s\n", strings.Join(sharedMissing, ", "))
+		fmt.Printf("  missing dirs: %s\n", strings.Join(sharedMissing, ", "))
 	} else {
-		fmt.Println("  todos los dirs presentes")
+		fmt.Println("  all dirs present")
 	}
 
 	drift := len(sharedMissing) > 0
 	for _, r := range reports {
 		fmt.Printf("\n[%s] %s\n", r.Account.ID, r.ConfigDir)
-		login := "sin login"
+		login := "not logged in"
 		if r.LoggedIn {
-			login = "login ✓"
+			login = "logged in ✓"
 		}
 		cfg := ".claude.json ✓"
 		if !r.HasConfig {
-			cfg = ".claude.json FALTA"
+			cfg = ".claude.json MISSING"
 		}
 		fmt.Printf("  %s · %s\n", login, cfg)
 		for _, d := range r.Dirs {
@@ -411,17 +411,17 @@ func cmdDoctor(args []string) {
 	}
 	if !fix {
 		if drift {
-			fmt.Println("\nHay deriva. Repara con:  houston doctor --fix")
+			fmt.Println("\nDrift detected. Repair with:  houston doctor --fix")
 		} else {
-			fmt.Println("\nTodo en orden.")
+			fmt.Println("\nAll good.")
 		}
 		return
 	}
 
-	fmt.Println("\nReparando…")
+	fmt.Println("\nRepairing…")
 	res, err := provision.Fix(accs)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "houston: fallo reparando:", err)
+		fmt.Fprintln(os.Stderr, "houston: repair failed:", err)
 		os.Exit(1)
 	}
 	for _, c := range res.Created {
@@ -431,9 +431,9 @@ func cmdDoctor(args []string) {
 		fmt.Println("  ! " + s)
 	}
 	if len(res.Created) == 0 && len(res.Skipped) == 0 {
-		fmt.Println("  (nada que cambiar)")
+		fmt.Println("  (nothing to change)")
 	}
-	fmt.Println("Listo.")
+	fmt.Println("Done.")
 }
 
 // --- TUI / debug ----------------------------------------------------------
@@ -446,7 +446,7 @@ func cmdTUI(args []string) {
 		}
 	}
 	scanFn := scan.ScanAll
-	displayRoot := "auto (shared + cuentas)"
+	displayRoot := "auto (shared + accounts)"
 	if explicitRoot != "" {
 		displayRoot = explicitRoot
 		scanFn = func() ([]model.Mission, error) { return scan.Scan(explicitRoot) }
@@ -471,12 +471,12 @@ func cmdTUI(args []string) {
 
 	st, err := store.Load()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "houston: no pude cargar el store:", err)
+		fmt.Fprintln(os.Stderr, "houston: couldn't load the store:", err)
 		os.Exit(1)
 	}
 	missions, err := scanFn()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "houston: error escaneando:", err)
+		fmt.Fprintln(os.Stderr, "houston: scan failed:", err)
 		os.Exit(1)
 	}
 	if err := tui.Run(displayRoot, scanFn, st, missions); err != nil {

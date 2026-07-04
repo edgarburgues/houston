@@ -44,11 +44,11 @@ func newModel(t *testing.T) Model {
 func TestInitialListAllMissions(t *testing.T) {
 	m := newModel(t)
 	if len(m.mid) != 3 {
-		t.Fatalf("esperaba 3 misiones en 'Todas', hay %d", len(m.mid))
+		t.Fatalf("expected 3 missions under 'All', got %d", len(m.mid))
 	}
 	// sorted by recency: aaaa first
 	if m.mid[0].ID != "aaaa1111" {
-		t.Errorf("orden por recencia incorrecto: %s", m.mid[0].ID)
+		t.Errorf("recency order wrong: %s", m.mid[0].ID)
 	}
 }
 
@@ -58,11 +58,11 @@ func TestSearchFilters(t *testing.T) {
 	m = drive(m, runes("/"), runes("p"), runes("o"), runes("k"))
 	// pokewalker + pokemon icons match "pok"; ankis does not
 	if len(m.mid) != 2 {
-		t.Fatalf("búsqueda 'pok' debería dar 2, dio %d", len(m.mid))
+		t.Fatalf("search 'pok' should give 2, got %d", len(m.mid))
 	}
 	m = drive(m, key(tea.KeyEnter))
 	if m.act != actNone {
-		t.Errorf("enter debería cerrar el modo input")
+		t.Errorf("enter should close input mode")
 	}
 }
 
@@ -71,11 +71,11 @@ func TestPinTogglesAndPersists(t *testing.T) {
 	target := m.mid[m.midCur].Key()
 	m = drive(m, runes("*"))
 	if !m.st.MetaOf(target).Pinned {
-		t.Fatalf("la misión debería quedar fijada")
+		t.Fatalf("the mission should end up pinned")
 	}
 	m = drive(m, runes("*"))
 	if m.st.MetaOf(target).Pinned {
-		t.Fatalf("segunda pulsación debería desfijar")
+		t.Fatalf("a second press should unpin")
 	}
 }
 
@@ -84,11 +84,11 @@ func TestArchiveRemovesFromAll(t *testing.T) {
 	target := m.mid[m.midCur].Key()
 	m = drive(m, runes("a")) // archive
 	if !m.st.MetaOf(target).Archived {
-		t.Fatalf("debería estar archivada")
+		t.Fatalf("it should be archived")
 	}
 	for _, ms := range m.mid {
 		if ms.Key() == target {
-			t.Fatalf("la archivada no debería seguir en 'Todas'")
+			t.Fatalf("an archived mission should not stay under 'All'")
 		}
 	}
 }
@@ -100,10 +100,10 @@ func TestCreateProgramAndAddMission(t *testing.T) {
 	m = drive(m, runes("p"), runes("P"), runes("o"), runes("k"), key(tea.KeyEnter))
 	p := m.st.ProgramByName("Pok")
 	if p == nil {
-		t.Fatalf("el programa 'Pok' debería existir")
+		t.Fatalf("program 'Pok' should exist")
 	}
 	if len(p.Missions) != 1 || p.Missions[0] != target {
-		t.Fatalf("la misión debería estar en el programa: %+v", p.Missions)
+		t.Fatalf("the mission should be in the program: %+v", p.Missions)
 	}
 	// left pane should now include the program
 	found := false
@@ -113,6 +113,6 @@ func TestCreateProgramAndAddMission(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("el panel izquierdo debería listar el programa")
+		t.Errorf("the left pane should list the program")
 	}
 }

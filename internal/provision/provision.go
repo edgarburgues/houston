@@ -60,17 +60,17 @@ func (s LinkState) Drift() bool { return s == LinkWrong || s == LinkRealData || 
 func (s LinkState) String() string {
 	switch s {
 	case LinkOK:
-		return "enlazado"
+		return "linked"
 	case LinkMissing:
-		return "falta enlace"
+		return "link missing"
 	case LinkWrong:
-		return "enlace a destino erróneo"
+		return "link to wrong target"
 	case LinkRealEmpty:
-		return "carpeta real vacía (se puede enlazar)"
+		return "real empty dir (safe to link)"
 	case LinkRealData:
-		return "carpeta real CON datos (no se toca)"
+		return "real dir WITH data (left untouched)"
 	case LinkFile:
-		return "hay un fichero en medio"
+		return "a regular file is in the way"
 	default:
 		return "?"
 	}
@@ -178,7 +178,7 @@ func Fix(accs []accounts.Account) (FixResult, error) {
 			if err := os.WriteFile(cj, seed, 0o600); err != nil {
 				return res, err
 			}
-			res.Created = append(res.Created, "account-"+a.ID+"/.claude.json (semilla)")
+			res.Created = append(res.Created, "account-"+a.ID+"/.claude.json (seed)")
 		}
 		// seed settings/mcp from shared if present and missing here
 		for _, f := range seedFiles {
@@ -200,23 +200,23 @@ func Fix(accs []accounts.Account) (FixResult, error) {
 				if err := makeLink(link, target); err != nil {
 					return res, err
 				}
-				res.Created = append(res.Created, "account-"+a.ID+"/"+d+" → enlace")
+				res.Created = append(res.Created, "account-"+a.ID+"/"+d+" → linked")
 			case LinkRealEmpty:
 				_ = os.Remove(link)
 				if err := makeLink(link, target); err != nil {
 					return res, err
 				}
-				res.Created = append(res.Created, "account-"+a.ID+"/"+d+" → enlace (carpeta vacía sustituida)")
+				res.Created = append(res.Created, "account-"+a.ID+"/"+d+" → linked (empty dir replaced)")
 			case LinkWrong:
 				_ = os.Remove(link) // removes only the link, not the target
 				if err := makeLink(link, target); err != nil {
 					return res, err
 				}
-				res.Created = append(res.Created, "account-"+a.ID+"/"+d+" → re-enlazado (destino corregido)")
+				res.Created = append(res.Created, "account-"+a.ID+"/"+d+" → re-linked (target fixed)")
 			case LinkRealData:
-				res.Skipped = append(res.Skipped, "account-"+a.ID+"/"+d+": carpeta real con datos; fusiónala a "+target+" a mano y re-ejecuta")
+				res.Skipped = append(res.Skipped, "account-"+a.ID+"/"+d+": real dir with data; merge it into "+target+" manually and re-run")
 			case LinkFile:
-				res.Skipped = append(res.Skipped, "account-"+a.ID+"/"+d+": hay un fichero donde debería ir el enlace")
+				res.Skipped = append(res.Skipped, "account-"+a.ID+"/"+d+": a file sits where the link should go")
 			}
 		}
 	}

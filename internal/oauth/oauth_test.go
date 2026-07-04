@@ -13,8 +13,8 @@ func TestRefresh(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token":  "nuevo-access",
-			"refresh_token": "nuevo-refresh",
+			"access_token":  "new-access",
+			"refresh_token": "new-refresh",
 			"expires_in":    3600,
 		})
 	}))
@@ -24,26 +24,26 @@ func TestRefresh(t *testing.T) {
 	defer func() { tokenURL = old }()
 
 	before := time.Now().UnixMilli()
-	tk, err := Refresh("viejo-refresh", 5*time.Second)
+	tk, err := Refresh("old-refresh", 5*time.Second)
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	if gotBody["grant_type"] != "refresh_token" || gotBody["refresh_token"] != "viejo-refresh" || gotBody["client_id"] != clientID {
-		t.Errorf("cuerpo de la petición incorrecto: %v", gotBody)
+	if gotBody["grant_type"] != "refresh_token" || gotBody["refresh_token"] != "old-refresh" || gotBody["client_id"] != clientID {
+		t.Errorf("wrong request body: %v", gotBody)
 	}
-	if tk.AccessToken != "nuevo-access" || tk.RefreshToken != "nuevo-refresh" {
-		t.Errorf("tokens incorrectos: %+v", tk)
+	if tk.AccessToken != "new-access" || tk.RefreshToken != "new-refresh" {
+		t.Errorf("wrong tokens: %+v", tk)
 	}
-	// expiresAt ≈ ahora + 3600s, en milisegundos
+	// expiresAt ≈ now + 3600s, in milliseconds
 	want := before + 3600_000
 	if tk.ExpiresAt < want || tk.ExpiresAt > want+10_000 {
-		t.Errorf("ExpiresAt fuera de rango: %d (esperaba ~%d)", tk.ExpiresAt, want)
+		t.Errorf("ExpiresAt out of range: %d (expected ~%d)", tk.ExpiresAt, want)
 	}
 }
 
 func TestRefreshKeepsTokenWhenNotRotated(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// sin refresh_token en la respuesta: el endpoint no rotó
+		// no refresh_token in the response: the endpoint did not rotate
 		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "a", "expires_in": 60})
 	}))
 	defer srv.Close()
@@ -51,12 +51,12 @@ func TestRefreshKeepsTokenWhenNotRotated(t *testing.T) {
 	tokenURL = srv.URL
 	defer func() { tokenURL = old }()
 
-	tk, err := Refresh("el-de-siempre", 5*time.Second)
+	tk, err := Refresh("the-usual-one", 5*time.Second)
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	if tk.RefreshToken != "el-de-siempre" {
-		t.Errorf("sin rotación debería conservar el refresh token actual, dio %q", tk.RefreshToken)
+	if tk.RefreshToken != "the-usual-one" {
+		t.Errorf("without rotation the current refresh token should be kept, got %q", tk.RefreshToken)
 	}
 }
 
@@ -69,7 +69,7 @@ func TestRefreshErrors(t *testing.T) {
 	tokenURL = srv.URL
 	defer func() { tokenURL = old }()
 
-	if _, err := Refresh("caducado", 5*time.Second); err == nil {
-		t.Fatal("un HTTP 400 debería devolver error")
+	if _, err := Refresh("expired", 5*time.Second); err == nil {
+		t.Fatal("an HTTP 400 should return an error")
 	}
 }

@@ -29,7 +29,7 @@ func TestScanCacheReuseAndInvalidate(t *testing.T) {
 	c := LoadCache()
 	ms, err := scanRoot(root, c)
 	if err != nil || len(ms) != 1 {
-		t.Fatalf("scan inicial: %d misiones, err=%v", len(ms), err)
+		t.Fatalf("initial scan: %d missions, err=%v", len(ms), err)
 	}
 	if ms[0].UserMsgs != 1 {
 		t.Fatalf("UserMsgs = %d, want 1", ms[0].UserMsgs)
@@ -52,10 +52,10 @@ func TestScanCacheReuseAndInvalidate(t *testing.T) {
 	}
 	ms2, err := scanRoot(root, c2)
 	if err != nil || len(ms2) != 1 {
-		t.Fatalf("rescan: %d misiones, err=%v", len(ms2), err)
+		t.Fatalf("rescan: %d missions, err=%v", len(ms2), err)
 	}
 	if ms2[0].UserMsgs != 2 {
-		t.Fatalf("tras append UserMsgs = %d, want 2", ms2[0].UserMsgs)
+		t.Fatalf("after append UserMsgs = %d, want 2", ms2[0].UserMsgs)
 	}
 }
 

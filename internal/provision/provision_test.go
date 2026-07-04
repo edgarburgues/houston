@@ -44,15 +44,15 @@ func TestClassifyLinkOK(t *testing.T) {
 	os.MkdirAll(target, 0o755)
 	link := filepath.Join(root, "link")
 	if err := makeLink(link, target); err != nil {
-		t.Skipf("no se pudo crear enlace (privilegios?): %v", err)
+		t.Skipf("could not create link (privileges?): %v", err)
 	}
 	if s := classify(link, target); s != LinkOK {
-		t.Errorf("link correcto: got %v", s)
+		t.Errorf("correct link: got %v", s)
 	}
 	other := filepath.Join(root, "other")
 	os.MkdirAll(other, 0o755)
 	if s := classify(link, other); s != LinkWrong {
-		t.Errorf("link a destino distinto debería ser Wrong: got %v", s)
+		t.Errorf("link to a different target should be Wrong: got %v", s)
 	}
 }
 
@@ -64,10 +64,10 @@ func TestSeedConfigStripsIdentity(t *testing.T) {
 		[]byte(`{"hasCompletedOnboarding":true,"oauthAccount":{"emailAddress":"x@y.com"}}`), 0o600)
 	out := string(seedConfigJSON())
 	if want := "hasCompletedOnboarding"; !contains(out, want) {
-		t.Errorf("semilla debería conservar %q: %s", want, out)
+		t.Errorf("seed should keep %q: %s", want, out)
 	}
 	if contains(out, "oauthAccount") {
-		t.Errorf("semilla NO debería incluir oauthAccount: %s", out)
+		t.Errorf("seed must NOT include oauthAccount: %s", out)
 	}
 }
 
@@ -80,16 +80,16 @@ func TestFixIsIdempotent(t *testing.T) {
 
 	accs := []accounts.Account{{ID: "work"}}
 	if _, err := Fix(accs); err != nil {
-		t.Skipf("Fix falló (posible falta de privilegios para enlaces): %v", err)
+		t.Skipf("Fix failed (possibly missing link privileges): %v", err)
 	}
 	// second pass: no error, and everything reports OK
 	if _, err := Fix(accs); err != nil {
-		t.Fatalf("segunda pasada de Fix falló: %v", err)
+		t.Fatalf("second Fix pass failed: %v", err)
 	}
 	_, reports := Audit(accs)
 	for _, d := range reports[0].Dirs {
 		if !d.State.OK() {
-			t.Errorf("tras Fix, %s debería estar enlazado, está %v", d.Name, d.State)
+			t.Errorf("after Fix, %s should be linked, is %v", d.Name, d.State)
 		}
 	}
 }

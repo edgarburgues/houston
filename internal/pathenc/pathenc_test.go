@@ -44,10 +44,10 @@ func TestDecodeHyphenSegment(t *testing.T) {
 	proj := `C--Users-TESTER-Documents-Github-Pokemon-08-copia`
 	want := `C:\Users\TESTER\Documents\Github\Pokemon\08-copia`
 	if !isDir(want) {
-		t.Skip("carpeta real no presente; salto la prueba dependiente de disco")
+		t.Skip("real folder not present; skipping the disk-dependent test")
 	}
 	if got := DecodeProjectDir(proj); got != want {
-		t.Errorf("DecodeProjectDir(%q) = %q, want %q (08-copia debe quedar como un solo segmento)", proj, got, want)
+		t.Errorf("DecodeProjectDir(%q) = %q, want %q (08-copia must stay a single segment)", proj, got, want)
 	}
 }
 

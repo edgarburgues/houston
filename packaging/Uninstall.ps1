@@ -1,21 +1,20 @@
 #requires -Version 7.0
 <#
 .SYNOPSIS
-  Desinstala Houston revirtiendo SOLO lo que puso el instalador: el binario, los
-  bloques del perfil (PATH + alias `claude`) y la entrada de PATH de usuario en
-  Windows.
+  Uninstalls Houston, reverting ONLY what the installer put in place: the binary,
+  the profile blocks (PATH + `claude` alias) and the user PATH entry on Windows.
 
 .DESCRIPTION
-  Seguro por defecto: NUNCA borra tus conversaciones. Los datos compartidos
-  (~/.claude-shared) contienen las transcripciones reales y se conservan, igual
-  que los logins por cuenta (~/.claude-accounts) y el store de Houston.
+  Safe by default: it NEVER deletes your conversations. The shared data
+  (~/.claude-shared) holds the real transcripts and is kept, as are the
+  per-account logins (~/.claude-accounts) and Houston's store.
 
-  -PurgeData borra además SOLO el store propio de Houston (~/.claude/houston, que
-  guarda accounts.json) y la config de escaneo (~/.config/claudeswap). Sigue sin
-  tocar shared/ ni los dirs de cuentas (evita seguir junctions). El resto se borra
-  a mano siguiendo las instrucciones que imprime.
+  -PurgeData additionally deletes ONLY Houston's own store (~/.claude/houston,
+  which holds accounts.json) and the scan config (~/.config/claudeswap). It
+  still doesn't touch shared/ or the account dirs (avoids following junctions).
+  Everything else is deleted by hand following the instructions it prints.
 
-  Idempotente: seguro re-ejecutar.
+  Idempotent: safe to re-run.
 #>
 [CmdletBinding()]
 param(
@@ -32,14 +31,14 @@ function Note($m){ Write-Host "  . $m" -ForegroundColor DarkGray }
 if (-not $BinDir) { $BinDir = Join-Path $HOME '.local/bin' }
 $exe = if ($IsWindows) { 'houston.exe' } else { 'houston' }
 
-Info "Houston — desinstalando"
+Info "Houston — uninstalling"
 
-# --- 1. binario -----------------------------------------------------------
+# --- 1. binary --------------------------------------------------------------
 $binDst = Join-Path $BinDir $exe
-if (Test-Path $binDst) { Remove-Item $binDst -Force; Ok "binario eliminado ($binDst)" }
-else { Note "binario no encontrado ($binDst)" }
+if (Test-Path $binDst) { Remove-Item $binDst -Force; Ok "binary removed ($binDst)" }
+else { Note "binary not found ($binDst)" }
 
-# --- 2. bloques del perfil (PATH + alias claude) --------------------------
+# --- 2. profile blocks (PATH + claude alias) --------------------------------
 $prof = $PROFILE.CurrentUserAllHosts
 if (Test-Path $prof) {
   $text = Get-Content $prof -Raw
@@ -48,11 +47,11 @@ if (Test-Path $prof) {
   $text = [regex]::Replace($text, '(?ms)\r?\n?# >>> houston-claude >>>.*?# <<< houston-claude <<<\r?\n?', "`n")
   if ($text -ne $orig) {
     Set-Content -Path $prof -Value $text.TrimEnd() -Encoding utf8
-    Ok "bloques del perfil eliminados ($prof)"
-  } else { Note "el perfil no tenía bloques de houston" }
-} else { Note "sin perfil ($prof)" }
+    Ok "profile blocks removed ($prof)"
+  } else { Note "the profile had no houston blocks" }
+} else { Note "no profile ($prof)" }
 
-# --- 3. PATH de usuario en Windows ----------------------------------------
+# --- 3. user PATH on Windows -------------------------------------------------
 if ($IsWindows) {
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
   if ($userPath) {
@@ -60,12 +59,12 @@ if ($IsWindows) {
     $new = $parts -join ';'
     if ($new -ne $userPath.TrimEnd(';')) {
       [Environment]::SetEnvironmentVariable('Path', $new, 'User')
-      Ok "PATH de usuario (Windows) limpiado"
-    } else { Note "PATH de usuario no contenía $BinDir" }
+      Ok "user PATH (Windows) cleaned"
+    } else { Note "user PATH did not contain $BinDir" }
   }
 }
 
-# --- 4. datos (opcional) --------------------------------------------------
+# --- 4. data (optional) -------------------------------------------------------
 $store    = Join-Path $HOME '.claude/houston'
 $swapCfg  = Join-Path $HOME '.config/claudeswap'
 $shared   = Join-Path $HOME '.claude-shared'
@@ -73,17 +72,17 @@ $accounts = Join-Path $HOME '.claude-accounts'
 
 if ($PurgeData) {
   foreach ($p in @($store, $swapCfg)) {
-    if (Test-Path $p) { Remove-Item $p -Recurse -Force; Ok "borrado $p" }
+    if (Test-Path $p) { Remove-Item $p -Recurse -Force; Ok "deleted $p" }
   }
-  Warn "se conservan tus conversaciones y logins:"
-  Note "$shared     (transcripciones reales)"
-  Note "$accounts   (login por cuenta)"
+  Warn "your conversations and logins are kept:"
+  Note "$shared     (real transcripts)"
+  Note "$accounts   (per-account logins)"
 } else {
-  Note "datos conservados (usa -PurgeData para borrar el store de Houston)"
+  Note "data kept (use -PurgeData to delete Houston's store)"
 }
 
 Write-Host ""
-Info "Listo. Houston desinstalado. Abre una terminal nueva para refrescar el PATH."
-Write-Host "  Tus conversaciones siguen en: $shared" -ForegroundColor DarkGray
-Write-Host "  Para borrarlas TODO a mano (irreversible):" -ForegroundColor DarkGray
+Info "Done. Houston uninstalled. Open a new terminal to refresh the PATH."
+Write-Host "  Your conversations are still in: $shared" -ForegroundColor DarkGray
+Write-Host "  To delete EVERYTHING by hand (irreversible):" -ForegroundColor DarkGray
 Write-Host "    Remove-Item '$shared','$accounts','$store','$swapCfg' -Recurse -Force" -ForegroundColor DarkGray

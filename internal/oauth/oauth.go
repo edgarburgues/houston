@@ -63,7 +63,7 @@ func Refresh(refreshToken string, timeout time.Duration) (Tokens, error) {
 		return Tokens{}, err
 	}
 	if r.AccessToken == "" {
-		return Tokens{}, fmt.Errorf("refresh sin access_token en la respuesta")
+		return Tokens{}, fmt.Errorf("refresh response missing access_token")
 	}
 	exp := r.ExpiresIn
 	if exp <= 0 {
@@ -78,7 +78,7 @@ func Refresh(refreshToken string, timeout time.Duration) (Tokens, error) {
 		ExpiresAt:    time.Now().Add(time.Duration(exp) * time.Second).UnixMilli(),
 	}
 	if t.RefreshToken == "" {
-		t.RefreshToken = refreshToken // no rotó: conserva el actual
+		t.RefreshToken = refreshToken // did not rotate: keep the current one
 	}
 	return t, nil
 }

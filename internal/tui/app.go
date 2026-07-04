@@ -110,7 +110,7 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 		missions: missions,
 		input:    ti,
 		focus:    focusMid,
-		status:   "Houston listo · / buscar · enter resume · ? ayuda",
+		status:   "Houston ready · / search · enter resume · ? help",
 	}
 	return m
 }
@@ -177,9 +177,9 @@ func shortID(s string, n int) string {
 
 func (m *Model) rebuildLeft() {
 	items := []leftItem{
-		{kind: lkAll, label: "◷ Todas"},
-		{kind: lkPinned, label: "★ Fijadas"},
-		{kind: lkArchived, label: "⌁ Archivadas"},
+		{kind: lkAll, label: "◷ All"},
+		{kind: lkPinned, label: "★ Pinned"},
+		{kind: lkArchived, label: "⌁ Archived"},
 	}
 	for _, p := range m.st.Programs {
 		items = append(items, leftItem{kind: lkProgram, label: "▸ " + p.Name, prog: p.Name})
@@ -293,7 +293,7 @@ func (m *Model) selected() (model.Mission, bool) {
 // silently claiming success. Returns true if there was an error.
 func (m *Model) noteSaveErr(err error) bool {
 	if err != nil {
-		m.status = "no pude guardar: " + err.Error()
+		m.status = "couldn't save: " + err.Error()
 		return true
 	}
 	return false
@@ -312,9 +312,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case execDoneMsg:
 		if msg.err != nil {
-			m.status = "claude falló: " + msg.err.Error()
+			m.status = "claude failed: " + msg.err.Error()
 		} else {
-			m.status = "volviste de claude"
+			m.status = "back from claude"
 		}
 		return m, nil
 
@@ -390,12 +390,12 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a, ok := m.curAccount(); ok {
 			if m.pendingDelete != a.ID {
 				m.pendingDelete = a.ID
-				m.status = "¿eliminar la cuenta " + a.ID + "? pulsa d/x otra vez para confirmar"
+				m.status = "delete account " + a.ID + "? press d/x again to confirm"
 				return m, nil
 			}
 			m.pendingDelete = ""
 			if err := accounts.Remove(a.ID); err != nil {
-				m.status = "no pude eliminar: " + err.Error()
+				m.status = "couldn't delete: " + err.Error()
 				return m, nil
 			}
 			m.accs, _ = accounts.Load()
@@ -405,7 +405,7 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.accCur < 0 {
 				m.accCur = 0
 			}
-			m.status = "cuenta eliminada: " + a.ID
+			m.status = "account removed: " + a.ID
 		}
 	case "enter":
 		if a, ok := m.curAccount(); ok {
@@ -440,13 +440,13 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "right", "l":
 		m.focus = focusMid
 	case "/":
-		m.startInput(actSearch, "Buscar: ")
+		m.startInput(actSearch, "Search: ")
 		m.input.SetValue(m.query)
 	case "esc":
 		if m.query != "" {
 			m.query = ""
 			m.refresh()
-			m.status = "filtro limpiado"
+			m.status = "filter cleared"
 		}
 	case "pgdown", "f":
 		m.preview.HalfPageDown()
@@ -459,7 +459,7 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.status = err.Error()
 				return m, nil
 			}
-			m.status = "lanzando claude --resume " + shortID(ms.ID, 8) + " …"
+			m.status = "launching claude --resume " + shortID(ms.ID, 8) + " …"
 			return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return execDoneMsg{err} })
 		}
 	case "*":
@@ -470,31 +470,31 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		if ms, ok := m.selected(); ok {
 			if !m.noteSaveErr(m.st.ToggleArchive(ms.Key())) {
-				m.status = "archivado/desarchivado"
+				m.status = "archived/unarchived"
 			}
 			m.refresh()
 		}
 	case "t":
 		if _, ok := m.selected(); ok {
-			m.startInput(actTag, "Tag (vacío=quitar último): ")
+			m.startInput(actTag, "Tag (empty = remove last): ")
 		}
 	case "n":
 		if ms, ok := m.selected(); ok {
-			m.startInput(actNote, "Nota: ")
+			m.startInput(actNote, "Note: ")
 			m.input.SetValue(m.st.MetaOf(ms.Key()).Note)
 		}
 	case "p":
 		if _, ok := m.selected(); ok {
-			m.startInput(actAddProgram, "Añadir a programa: ")
+			m.startInput(actAddProgram, "Add to program: ")
 		}
 	case "P":
-		m.startInput(actNewProgram, "Nuevo programa: ")
+		m.startInput(actNewProgram, "New program: ")
 	case "x":
 		// remove from current program
 		if cur, ok := m.curLeft(); ok && cur.kind == lkProgram {
 			if ms, ok := m.selected(); ok {
 				if !m.noteSaveErr(m.st.RemoveFromProgram(cur.prog, ms.Key())) {
-					m.status = "quitada del programa " + cur.prog
+					m.status = "removed from program " + cur.prog
 				}
 				m.refresh()
 			}
@@ -503,9 +503,9 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if ms, ok := m.selected(); ok {
 			out := filepath.Join(store.Dir(), "exports", safeName(ms.Title, ms.ID)+".md")
 			if p, err := export.Mission(ms, out); err != nil {
-				m.status = "export falló: " + err.Error()
+				m.status = "export failed: " + err.Error()
 			} else {
-				m.status = "exportado → " + p
+				m.status = "exported → " + p
 			}
 		}
 	case "r":
@@ -513,9 +513,9 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if ms, err := m.rescan(); err == nil {
 				m.missions = ms
 				m.refresh()
-				m.status = fmt.Sprintf("reindexado: %d misiones", len(ms))
+				m.status = fmt.Sprintf("reindexed: %d missions", len(ms))
 			} else {
-				m.status = "reindex falló: " + err.Error()
+				m.status = "reindex failed: " + err.Error()
 			}
 		}
 	}
@@ -527,7 +527,7 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.act = actNone
 		m.input.Blur()
-		if m.prompt == "Buscar: " {
+		if m.prompt == "Search: " {
 			// keep query as-is
 		}
 		return m, nil
@@ -567,13 +567,13 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					err = m.st.AddToProgram(val, ms.Key())
 				}
 				if !m.noteSaveErr(err) {
-					m.status = "añadida a " + val
+					m.status = "added to " + val
 				}
 			}
 		case actNewProgram:
 			if val != "" {
 				if !m.noteSaveErr(m.st.CreateProgram(val, "")) {
-					m.status = "programa creado: " + val
+					m.status = "program created: " + val
 				}
 			}
 		}
@@ -631,7 +631,7 @@ func (m *Model) updatePreview() {
 	}
 	ms, ok := m.selected()
 	if !ok {
-		m.preview.SetContent(dimStyle.Render("Sin misión seleccionada."))
+		m.preview.SetContent(dimStyle.Render("No mission selected."))
 		return
 	}
 	meta := m.st.MetaOf(ms.Key())
@@ -641,21 +641,21 @@ func (m *Model) updatePreview() {
 	}
 	b.WriteString(titleStyle.Bold(true).Render(ms.Title) + "\n\n")
 	row("ID", ms.ID)
-	row("Proyecto", ms.Project)
+	row("Project", ms.Project)
 	row("cwd", ms.Cwd)
 	if ms.LastCwd != "" && ms.LastCwd != ms.Cwd {
-		row("Trabajo en", ms.LastCwd)
+		row("Worked in", ms.LastCwd)
 	}
-	row("Rama", ms.GitBranch)
-	row("Versión", ms.Version)
+	row("Branch", ms.GitBranch)
+	row("Version", ms.Version)
 	if !ms.FirstTime.IsZero() {
-		row("Periodo", ms.FirstTime.Local().Format("06-01-02 15:04")+" → "+ms.LastTime.Local().Format("06-01-02 15:04"))
+		row("Period", ms.FirstTime.Local().Format("06-01-02 15:04")+" → "+ms.LastTime.Local().Format("06-01-02 15:04"))
 	}
-	row("Mensajes", fmt.Sprintf("%d (👤%d 🤖%d)", ms.MessageCount(), ms.UserMsgs, ms.AssistantMsgs))
+	row("Messages", fmt.Sprintf("%d (👤%d 🤖%d)", ms.MessageCount(), ms.UserMsgs, ms.AssistantMsgs))
 	row("Tool calls", fmt.Sprintf("%d", ms.ToolCalls()))
-	row("Tamaño", fmt.Sprintf("%.1f MB", float64(ms.SizeBytes)/(1024*1024)))
+	row("Size", fmt.Sprintf("%.1f MB", float64(ms.SizeBytes)/(1024*1024)))
 	if ms.HasSubagents {
-		row("Subagentes", "sí")
+		row("Subagents", "yes")
 	}
 	if top := topTools(ms.Tools, 6); top != "" {
 		row("Top tools", top)
@@ -664,13 +664,13 @@ func (m *Model) updatePreview() {
 		b.WriteString("\n" + tagStyle.Render("#"+strings.Join(meta.Tags, "  #")) + "\n")
 	}
 	if meta.Note != "" {
-		b.WriteString("\n" + labelStyle.Render("Nota: ") + valStyle.Render(meta.Note) + "\n")
+		b.WriteString("\n" + labelStyle.Render("Note: ") + valStyle.Render(meta.Note) + "\n")
 	}
 	if ms.FirstPrompt != "" {
-		b.WriteString("\n" + labelStyle.Render("▸ Primer mensaje") + "\n" + dimStyle.Render(clipMulti(ms.FirstPrompt, 600)) + "\n")
+		b.WriteString("\n" + labelStyle.Render("▸ First message") + "\n" + dimStyle.Render(clipMulti(ms.FirstPrompt, 600)) + "\n")
 	}
 	if ms.LastPrompt != "" {
-		b.WriteString("\n" + labelStyle.Render("▸ Último mensaje") + "\n" + dimStyle.Render(clipMulti(ms.LastPrompt, 600)) + "\n")
+		b.WriteString("\n" + labelStyle.Render("▸ Last message") + "\n" + dimStyle.Render(clipMulti(ms.LastPrompt, 600)) + "\n")
 	}
 	b.WriteString("\n" + dimStyle.Render(resume.Hint(ms)) + "\n")
 	m.preview.SetContent(b.String())
@@ -709,12 +709,12 @@ func topTools(t map[string]int, n int) string {
 
 func (m Model) View() string {
 	if !m.ready {
-		return "cargando Houston…"
+		return "loading Houston…"
 	}
 	if m.screen == screenAccounts {
 		return m.viewAccounts()
 	}
-	header := headerStyle.Width(m.width).Render(fmt.Sprintf("🚀 Houston   %d misiones   ·   %d programas   ·   [A] cuentas", len(m.missions), len(m.st.Programs)))
+	header := headerStyle.Width(m.width).Render(fmt.Sprintf("🚀 Houston   %d missions   ·   %d programs   ·   [A] accounts", len(m.missions), len(m.st.Programs)))
 
 	left := m.viewLeft()
 	mid := m.viewMid()
@@ -725,7 +725,7 @@ func (m Model) View() string {
 	if m.act != actNone {
 		footer = keyStyle.Render(m.prompt) + m.input.View()
 	} else if m.showHelp {
-		footer = footerStyle.Render(clip("↑↓/jk mover · tab/←→ panel · / buscar · enter resume · * fijar · a archivar · t tag · n nota · p→prog · P nuevo · x quitar · e export · A cuentas · r reindex · q salir", m.width))
+		footer = footerStyle.Render(clip("↑↓/jk move · tab/←→ pane · / search · enter resume · * pin · a archive · t tag · n note · p→prog · P new · x remove · e export · A accounts · r reindex · q quit", m.width))
 	} else {
 		footer = footerStyle.Render(clip(m.status, m.width))
 	}
@@ -795,7 +795,7 @@ func (m Model) viewMid() string {
 		lines = append(lines, pin+" "+dimStyle.Render(date)+" "+id+"  "+title+tag)
 	}
 	if len(m.mid) == 0 {
-		lines = append(lines, dimStyle.Render("(sin misiones)"))
+		lines = append(lines, dimStyle.Render("(no missions)"))
 	}
 	content := padBox(lines, h)
 	st := paneBlurred
@@ -861,17 +861,17 @@ func safeName(title, id string) string {
 }
 
 func (m Model) viewAccounts() string {
-	header := headerStyle.Width(m.width).Render(fmt.Sprintf("🚀 Houston · Cuentas (%d)   ·   [esc] volver", len(m.accs)))
+	header := headerStyle.Width(m.width).Render(fmt.Sprintf("🚀 Houston · Accounts (%d)   ·   [esc] back", len(m.accs)))
 	w := m.width - 2
 	h := m.bodyH() - 2
 	var lines []string
 	if len(m.accs) == 0 {
 		lines = append(lines,
-			dimStyle.Render("Sin cuentas todavía."),
+			dimStyle.Render("No accounts yet."),
 			"",
-			labelStyle.Render("Para añadir una cuenta:"),
-			"  "+keyStyle.Render("1) houston account add <etiqueta>"),
-			"  "+keyStyle.Render("2) houston run")+dimStyle.Render("   (la primera vez hará /login en el navegador)"),
+			labelStyle.Render("To add an account:"),
+			"  "+keyStyle.Render("1) houston account add <label>"),
+			"  "+keyStyle.Render("2) houston run")+dimStyle.Render("   (the first time it will /login in the browser)"),
 		)
 	} else {
 		for i, a := range m.accs {
@@ -879,17 +879,17 @@ func (m Model) viewAccounts() string {
 			p, has := m.accProbes[a.ID]
 			switch {
 			case m.accProbing:
-				press = dimStyle.Render("sondeando…")
+				press = dimStyle.Render("probing…")
 			case has && p.OK:
-				press = fmt.Sprintf("presión %3.0f%%  (5h %.0f%% · 7d %.0f%%)", p.Pressure, p.U5, p.U7)
+				press = fmt.Sprintf("pressure %3.0f%%  (5h %.0f%% · 7d %.0f%%)", p.Pressure, p.U5, p.U7)
 			case has:
-				press = dimStyle.Render("sin uso (" + p.Err + ")")
+				press = dimStyle.Render("no usage (" + p.Err + ")")
 			default:
 				press = dimStyle.Render("—")
 			}
 			last := a.LastUse
 			if last == "" {
-				last = "nunca"
+				last = "never"
 			} else if len(last) >= 10 {
 				last = last[:10]
 			}
@@ -897,12 +897,12 @@ func (m Model) viewAccounts() string {
 			if i == m.accCur {
 				lines = append(lines, selStyle.Width(w).Render(clip(raw, w)))
 			} else {
-				lines = append(lines, clip(raw, w)+dimStyle.Render("   últ:"+last))
+				lines = append(lines, clip(raw, w)+dimStyle.Render("   last:"+last))
 			}
 		}
 	}
 	body := paneFocused.Width(w).Height(h).Render(padBox(lines, h))
-	footer := footerStyle.Render(clip("↑↓ mover · enter lanzar sesión · r sondear uso · d/x eliminar · esc volver · q salir", m.width))
+	footer := footerStyle.Render(clip("↑↓ move · enter launch session · r probe usage · d/x remove · esc back · q quit", m.width))
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 

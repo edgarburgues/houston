@@ -16,7 +16,7 @@ if (-not $go) {
   $cand = Join-Path $HOME 'go-sdk/go/bin/go.exe'
   if (Test-Path $cand) { $go = $cand }
 }
-if (-not $go) { throw "go no encontrado; instala Go ≥ 1.26" }
+if (-not $go) { throw "go not found; install Go ≥ 1.26" }
 
 $targets = @(
   @{os='windows';arch='amd64';exe='houston.exe'},
@@ -27,14 +27,14 @@ $targets = @(
   @{os='linux';  arch='arm64';exe='houston'}
 )
 
-Write-Host "Compilando ($Version)..." -ForegroundColor Cyan
+Write-Host "Building ($Version)..." -ForegroundColor Cyan
 Push-Location $repo
 try {
   $env:CGO_ENABLED = '0'
   foreach ($t in $targets) {
     $env:GOOS = $t.os; $env:GOARCH = $t.arch
     & $go build -trimpath -ldflags "-s -w -X main.version=$Version" -o (Join-Path $pkg "bin/$($t.os)-$($t.arch)/$($t.exe)") .
-    if ($LASTEXITCODE -ne 0) { throw "go build falló: $($t.os)-$($t.arch)" }
+    if ($LASTEXITCODE -ne 0) { throw "go build failed: $($t.os)-$($t.arch)" }
     Write-Host ("  ✓ {0}-{1}" -f $t.os, $t.arch) -ForegroundColor Green
   }
 } finally {

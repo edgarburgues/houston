@@ -39,11 +39,11 @@ function New-Link($link, $target) {
 }
 
 # --- 1. shared store: ensure the shared dirs exist as real dirs --------------
-Info "1) Store compartido: $shared"
+Info "1) Shared store: $shared"
 New-Item -ItemType Directory -Force -Path $shared | Out-Null
 foreach ($d in $shareDirs) {
   $p = Join-Path $shared $d
-  if (-not (Test-Path $p)) { New-Item -ItemType Directory -Force -Path $p | Out-Null; Ok "shared/$d" } else { Note "shared/$d ya existe" }
+  if (-not (Test-Path $p)) { New-Item -ItemType Directory -Force -Path $p | Out-Null; Ok "shared/$d" } else { Note "shared/$d already exists" }
 }
 # seed shared settings/mcp from the current ~/.claude if shared copy missing
 if ((Test-Path $srcSettings) -and -not (Test-Path (Join-Path $shared 'settings.json'))) { Copy-Item $srcSettings (Join-Path $shared 'settings.json'); Ok 'shared/settings.json' }
@@ -53,7 +53,7 @@ if ((Test-Path $srcMcp)      -and -not (Test-Path (Join-Path $shared 'mcp.json')
 $srcSkills = Join-Path $HOME '.claude\skills'; $dstSkills = Join-Path $shared 'skills'
 if ((Test-Path $srcSkills) -and -not (Get-ChildItem $dstSkills -Force -ErrorAction SilentlyContinue)) {
   Copy-Item (Join-Path $srcSkills '*') $dstSkills -Recurse -Force -ErrorAction SilentlyContinue
-  Ok 'shared/skills (seed desde ~/.claude/skills)'
+  Ok 'shared/skills (seeded from ~/.claude/skills)'
 }
 
 # --- 2. seed template: ~/.claude.json minus oauthAccount (fresh identity) ----
@@ -69,17 +69,17 @@ if (Test-Path $srcConfig) {
 $cfg | ConvertTo-Json -Depth 100 | Set-Content $seed -Encoding utf8
 
 # --- 3. per-account dirs + junctions + seed ----------------------------------
-Info "2) Directorios por cuenta: $accountsRoot"
+Info "2) Per-account dirs: $accountsRoot"
 New-Item -ItemType Directory -Force -Path $accountsRoot | Out-Null
-if (-not (Test-Path $accountsJson)) { throw "no existe $accountsJson — crea cuentas primero: houston account add <etiqueta>" }
+if (-not (Test-Path $accountsJson)) { throw "missing $accountsJson — create accounts first: houston account add <label>" }
 $accs = @(Get-Content $accountsJson -Raw | ConvertFrom-Json)
-if ($accs.Count -eq 0) { throw "no hay cuentas en $accountsJson — añade alguna: houston account add <etiqueta>" }
+if ($accs.Count -eq 0) { throw "no accounts in $accountsJson — add one: houston account add <label>" }
 foreach ($a in $accs) {
   $dir = Join-Path $accountsRoot ("account-" + $a.id)
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
   $cj = Join-Path $dir '.claude.json'
-  if (-not (Test-Path $cj)) { Copy-Item $seed $cj; Ok "account-$($a.id)/.claude.json (semilla)" } else { Note "account-$($a.id)/.claude.json conservado" }
+  if (-not (Test-Path $cj)) { Copy-Item $seed $cj; Ok "account-$($a.id)/.claude.json (seed)" } else { Note "account-$($a.id)/.claude.json kept" }
 
   foreach ($f in @('settings.json','mcp.json')) {
     $src = Join-Path $shared $f; $dst = Join-Path $dir $f
@@ -90,14 +90,14 @@ foreach ($a in $accs) {
     $link = Join-Path $dir $d; $target = Join-Path $shared $d
     if (Test-Path $link) {
       $it = Get-Item $link -Force
-      if ($it.LinkType) { Note "account-$($a.id)/$d ya enlazado"; continue }
+      if ($it.LinkType) { Note "account-$($a.id)/$d already linked"; continue }
       # real dir (not a link): migrate its content into shared, then replace with
       # a link — never delete data.
       $kids = @(Get-ChildItem $link -Force -ErrorAction SilentlyContinue)
       if ($kids.Count -gt 0) {
         if ($isWin) {
           & robocopy $link $target /E /XC /XN /XO /NFL /NDL /NP /NJH /NJS *> $null
-          if ($LASTEXITCODE -ge 8) { throw "robocopy falló (exit $LASTEXITCODE) fusionando $link -> $target; NO se renombra el original (revisa $link)" }
+          if ($LASTEXITCODE -ge 8) { throw "robocopy failed (exit $LASTEXITCODE) merging $link -> $target; the original is NOT renamed (check $link)" }
         } else {
           Get-ChildItem $link -Recurse -File | ForEach-Object {
             $rel = $_.FullName.Substring($link.Length).TrimStart([char]'/', [char]'\')
@@ -109,7 +109,7 @@ foreach ($a in $accs) {
         }
         $orphan = "$link.orphaned-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss')
         Rename-Item $link $orphan
-        Note "account-$($a.id)/$d tenía contenido real -> fusionado a shared (original: $(Split-Path $orphan -Leaf))"
+        Note "account-$($a.id)/$d had real content -> merged into shared (original: $(Split-Path $orphan -Leaf))"
       } else {
         Remove-Item $link -Force   # empty dir: safe to drop
       }
@@ -120,7 +120,7 @@ foreach ($a in $accs) {
 }
 
 # --- 4. claudeswap config so Houston's TUI scans this layout -----------------
-Info "3) Config para el escaneo del TUI"
+Info "3) Config for the TUI scan"
 $cfgDir = Join-Path $HOME '.config\claudeswap'
 New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
 [pscustomobject]@{ accountsDir = $accountsRoot; sharedDir = $shared } |
@@ -128,7 +128,7 @@ New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
 Ok "$cfgDir\config.json"
 
 Write-Host ""
-Info "Listo. Cuentas configuradas:"
+Info "Done. Accounts configured:"
 foreach ($a in $accs) { Write-Host "  $($a.id)  ->  $(Join-Path $accountsRoot ('account-'+$a.id))" }
 Write-Host ""
-Write-Host "Primer lanzamiento de cada cuenta: 'houston run' (si pide login, hazlo una vez; queda guardado por cuenta)." -ForegroundColor Yellow
+Write-Host "First launch of each account: 'houston run' (if it asks to log in, do it once; it is stored per account)." -ForegroundColor Yellow

@@ -38,7 +38,7 @@ func Command(m model.Mission) (*exec.Cmd, error) {
 		dir = filepath.Dir(filepath.Dir(m.Path)) // best effort
 	}
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-		return nil, fmt.Errorf("cwd no existe: %s", dir)
+		return nil, fmt.Errorf("cwd does not exist: %s", dir)
 	}
 
 	// Balance the resume across accounts, exactly like `houston run`: the shared

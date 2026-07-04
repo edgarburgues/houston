@@ -21,7 +21,7 @@
 param(
   [string]$BinDir,
   [switch]$NoProfileEdit,
-  [string]$Version = 'latest',          # tag de release a descargar (o 'latest')
+  [string]$Version = 'latest',          # release tag to download (or 'latest')
   [string]$Repo    = 'edgarburgues/houston'
 )
 
@@ -44,14 +44,14 @@ function Get-Platform {
   "$os-$arch"
 }
 
-Info "Houston — instalando"
+Info "Houston — installing"
 Write-Host "  bin:   $BinDir"
 Write-Host "  store: $storeDir"
 
 # --- 1. binary ------------------------------------------------------------
-# Prioridad: (a) binario local junto al script (distribución por zip) ->
-# (b) descarga desde GitHub Releases verificando SHA-256 -> (c) compilar con Go.
-Info "1) Binario houston"
+# Priority: (a) local binary next to the script (zip distribution) ->
+# (b) download from GitHub Releases verifying SHA-256 -> (c) build with Go.
+Info "1) houston binary"
 $exe   = if ($IsWindows) { 'houston.exe' } else { 'houston' }
 $plat  = Get-Platform
 $asset = if ($IsWindows) { "houston-$plat.exe" } else { "houston-$plat" }
@@ -60,12 +60,12 @@ $binDst   = Join-Path $BinDir $exe
 $prebuilt = Join-Path $pkg "bin/$plat/$exe"
 
 if (Test-Path $prebuilt) {
-  # (a) binario local (zip)
+  # (a) local binary (zip)
   Copy-Item $prebuilt $binDst -Force
   if (-not $IsWindows) { chmod +x $binDst }
   Ok "houston ($plat) -> $binDst (local)"
 } else {
-  # (b) descarga + verificación de checksum
+  # (b) download + checksum verification
   $base = if ($Version -eq 'latest') {
     "https://github.com/$Repo/releases/latest/download"
   } else {
@@ -75,41 +75,41 @@ if (Test-Path $prebuilt) {
   try {
     $tmp  = Join-Path ([IO.Path]::GetTempPath()) $asset
     $sums = Join-Path ([IO.Path]::GetTempPath()) 'houston-checksums.txt'
-    Warn "descargando $asset desde Releases ($Version)..."
+    Warn "downloading $asset from Releases ($Version)..."
     Invoke-WebRequest -Uri "$base/$asset"        -OutFile $tmp  -UseBasicParsing
     Invoke-WebRequest -Uri "$base/checksums.txt" -OutFile $sums -UseBasicParsing
     $line = Select-String -Path $sums -Pattern ([regex]::Escape($asset) + '\s*$') | Select-Object -First 1
-    if (-not $line) { throw "no encuentro $asset en checksums.txt" }
+    if (-not $line) { throw "couldn't find $asset in checksums.txt" }
     $expected = ($line.Line -split '\s+')[0]
     $actual   = (Get-FileHash -Algorithm SHA256 -Path $tmp).Hash
     if ($actual -ine $expected) {
-      throw "checksum NO coincide para ${asset}: esperado $expected, obtenido $actual"
+      throw "checksum MISMATCH for ${asset}: expected $expected, got $actual"
     }
     Copy-Item $tmp $binDst -Force
     if (-not $IsWindows) { chmod +x $binDst }
-    Ok "houston ($plat) -> $binDst (release $Version, SHA-256 verificado)"
+    Ok "houston ($plat) -> $binDst (release $Version, SHA-256 verified)"
     $downloaded = $true
   } catch {
-    Warn "descarga/verificación falló: $($_.Exception.Message)"
+    Warn "download/verification failed: $($_.Exception.Message)"
   }
   if (-not $downloaded) {
-    # (c) compilar desde fuente
+    # (c) build from source
     if (Get-Command go -ErrorAction SilentlyContinue) {
-      Warn "compilando con go..."
+      Warn "building with go..."
       Push-Location $repo
       try {
         & go build -o $binDst .
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $binDst)) { throw "go build falló" }
-        Ok "compilado -> $binDst"
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $binDst)) { throw "go build failed" }
+        Ok "built -> $binDst"
       } finally { Pop-Location }
     } else {
-      throw "no pude descargar el binario para $plat ni hay Go para compilar; descarga el zip de Releases o instala Go"
+      throw "couldn't download the binary for $plat and there's no Go to build with; download the Releases zip or install Go"
     }
   }
 }
 
 # --- 2. data dir + setup script -------------------------------------------
-Info "2) Carpeta de datos y script de setup"
+Info "2) Data dir and setup script"
 New-Item -ItemType Directory -Path $storeDir -Force | Out-Null
 Ok $storeDir
 $setupSrc = @((Join-Path $pkg 'houston-setup-accounts.ps1'), (Join-Path $repo 'houston-setup-accounts.ps1')) |
@@ -134,42 +134,42 @@ if ((`$env:PATH -split [IO.Path]::PathSeparator) -notcontains '$BinDir') { `$env
 # <<< houston <<<
 "@
     Add-Content -Path $prof -Value "`n$block`n"
-    Ok "perfil actualizado ($prof)"
-  } else { Ok "perfil ya configurado" }
+    Ok "profile updated ($prof)"
+  } else { Ok "profile already configured" }
 
-  # alias `claude` -> `houston run`: que `claude ...` se sienta normal pero lo
-  # orqueste Houston (elige cuenta, fija CLAUDE_CONFIG_DIR y lanza el claude real).
-  # Es una función de shell, así que no choca con el claude.exe del PATH (Houston
-  # lo resuelve por ruta absoluta en su proceso hijo).
+  # `claude` -> `houston run` alias: `claude ...` feels normal while Houston
+  # orchestrates it (picks an account, sets CLAUDE_CONFIG_DIR, launches the real claude).
+  # It is a shell function, so it does not clash with the claude.exe on the PATH
+  # (Houston resolves it by absolute path in its child process).
   $profText = if (Test-Path $prof) { Get-Content $prof -Raw } else { '' }
   $cmarker = '# >>> houston-claude >>>'
   if ($profText -notmatch [regex]::Escape($cmarker)) {
     $cblock = @'
 # >>> houston-claude >>>
-# `claude ...` se enruta por Houston. Para buscar/retomar conversaciones: houston
+# `claude ...` is routed through Houston. To search/resume conversations: houston
 function claude { houston run @args }
 # <<< houston-claude <<<
 '@
     Add-Content -Path $prof -Value "`n$cblock`n"
-    Ok "alias claude -> houston run anadido"
-  } else { Ok "alias claude ya configurado" }
+    Ok "claude -> houston run alias added"
+  } else { Ok "claude alias already configured" }
 
   # Windows: also persist to the user environment so cmd/GUI sessions find it.
   if ($IsWindows) {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (($userPath -split ';') -notcontains $BinDir) {
       [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $BinDir), 'User')
-      Ok "PATH de usuario (Windows) actualizado"
+      Ok "user PATH (Windows) updated"
     }
   }
 }
 
 Write-Host ""
-Info "Listo. Pasos siguientes (en una terminal nueva):"
-Write-Host "  1) registra cada cuenta:   houston account add <etiqueta>"
-Write-Host "  2) crea dirs + enlaces:    pwsh `"$storeDir\setup-accounts.ps1`""
-Write-Host "  3) lanza (login 1ª vez):   houston run   (o simplemente: claude)"
-Write-Host "  4) gestiona/retoma:        houston"
+Info "Done. Next steps (in a new terminal):"
+Write-Host "  1) register each account:  houston account add <label>"
+Write-Host "  2) create dirs + links:    pwsh `"$storeDir\setup-accounts.ps1`""
+Write-Host "  3) launch (1st-time login): houston run   (or simply: claude)"
+Write-Host "  4) manage/resume:          houston"
 Write-Host ""
-Write-Host "  'claude ...' queda enrutado por Houston (= 'houston run ...'). Para buscar/retomar: houston." -ForegroundColor DarkGray
-Write-Host "  Cada cuenta tiene su propio login; los datos (projects/sessions/…) se comparten." -ForegroundColor DarkGray
+Write-Host "  'claude ...' is routed through Houston (= 'houston run ...'). To search/resume: houston." -ForegroundColor DarkGray
+Write-Host "  Each account has its own login; the data (projects/sessions/…) is shared." -ForegroundColor DarkGray

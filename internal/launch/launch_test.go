@@ -7,10 +7,10 @@ func TestStripEnvRemovesInheritedConfigDir(t *testing.T) {
 	out := stripEnv(in, "CLAUDE_CONFIG_DIR")
 	for _, e := range out {
 		if len(e) >= len("CLAUDE_CONFIG_DIR=") && (e == "CLAUDE_CONFIG_DIR=old" || e == "claude_config_dir=alsoOld") {
-			t.Fatalf("debería haber quitado CLAUDE_CONFIG_DIR (cualquier caja): %q", e)
+			t.Fatalf("CLAUDE_CONFIG_DIR should have been stripped (any casing): %q", e)
 		}
 	}
 	if len(out) != 2 {
-		t.Fatalf("esperaba 2 (PATH, FOO), hay %d: %v", len(out), out)
+		t.Fatalf("expected 2 (PATH, FOO), got %d: %v", len(out), out)
 	}
 }

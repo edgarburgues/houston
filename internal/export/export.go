@@ -55,14 +55,14 @@ func Mission(m model.Mission, outPath string) (string, error) {
 		title = m.ID
 	}
 	fmt.Fprintf(w, "# %s\n\n", title)
-	fmt.Fprintf(w, "- **Misión**: `%s`\n- **Proyecto**: %s\n- **cwd**: `%s`\n- **Rama**: %s\n",
+	fmt.Fprintf(w, "- **Mission**: `%s`\n- **Project**: %s\n- **cwd**: `%s`\n- **Branch**: %s\n",
 		m.ID, m.Project, m.Cwd, m.GitBranch)
 	if !m.FirstTime.IsZero() {
-		fmt.Fprintf(w, "- **Periodo**: %s → %s\n",
+		fmt.Fprintf(w, "- **Period**: %s → %s\n",
 			m.FirstTime.Local().Format("2006-01-02 15:04"),
 			m.LastTime.Local().Format("2006-01-02 15:04"))
 	}
-	fmt.Fprintf(w, "- **Mensajes**: %d · **Tool calls**: %d\n\n---\n\n", m.MessageCount(), m.ToolCalls())
+	fmt.Fprintf(w, "- **Messages**: %d · **Tool calls**: %d\n\n---\n\n", m.MessageCount(), m.ToolCalls())
 
 	r := bufio.NewReaderSize(in, 1<<20)
 	for {
@@ -94,7 +94,7 @@ func writeTurn(w *bufio.Writer, line string) {
 		if e.IsMeta {
 			return
 		}
-		fmt.Fprintf(w, "### 🧑 Usuario\n\n%s\n\n", txt)
+		fmt.Fprintf(w, "### 🧑 User\n\n%s\n\n", txt)
 	case "assistant":
 		fmt.Fprintf(w, "### 🤖 Claude\n\n%s\n\n", txt)
 	}
