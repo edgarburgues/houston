@@ -91,6 +91,12 @@ on the PATH. To search/resume conversations, use `houston`.
 | `houston doctor` | audits the layout (links, logins, unshared dirs) |
 | `houston doctor --fix` | repairs the layout idempotently (never clobbers data) |
 | `houston doctor --resync-settings` | re-copies the shared `settings.json`/`mcp.json` into every account (settings are seeded, not linked) |
+| `houston mcp add <name> ...` | adds a user-scope MCP server to **every** account (passthrough to `claude mcp add`, then propagates) |
+| `houston mcp rm <name>` / `ls` | removes / lists MCP servers across accounts |
+| `houston plugin add <plugin>@<mkt>` | installs once (files are shared) and enables it in **every** account |
+| `houston plugin rm` / `ls` / `marketplace ...` | disables everywhere / drift table / manages shared marketplaces |
+| `houston skill add <git-url\|dir>` | installs a skill into the shared store — every account sees it instantly |
+| `houston skill rm <name>` / `ls` | removes / lists shared skills |
 | `houston version` | prints the version and warns if a newer one exists |
 | `houston update` | self-updates the binary from GitHub Releases (verifies SHA-256, asks first) |
 | `houston update --check` | only checks; reports whether a newer version exists |
@@ -109,6 +115,28 @@ remove · `e` export · **`A` accounts** · `r` reindex · `?` help · `q` quit.
 **Resume** `cd`s into the correct directory (it even resolves names with
 ambiguous hyphens, dots or spaces) and launches `claude --resume` with the
 chosen account — goodbye "No conversation found".
+
+## Fleet config: MCP, plugins and skills on every account
+
+The shared store already propagates FILES (skills, plugin installs, agents…),
+but per-account CONFIG never propagated: user-scope MCP servers live in each
+account's `.claude.json` and plugin enablement in each account's
+`settings.json`. The `houston mcp|plugin|skill` commands close that gap:
+
+- **`houston mcp add <name> ...`** accepts the same flags as `claude mcp add`
+  — the real `claude` runs once against the first account (full validation),
+  and the resulting server entry is patched surgically into every other
+  account's `.claude.json` (everything else in the file is preserved).
+- **`houston plugin add <plugin>@<marketplace>`** installs once (files land in
+  the shared plugins dir) and enables it in every account's `settings.json`.
+  Marketplaces (`houston plugin marketplace ...`) are shared, so adding one
+  once is already fleet-wide.
+- **`houston skill add <git-url|dir>`** installs into the shared skills dir —
+  no propagation needed at all. Git installs are hardened (no `ext::`/`file://`
+  transports, no option injection, shallow + timeout, symlinks never copied,
+  staged installs).
+
+`houston mcp ls` / `plugin ls` print a per-account drift table (✓/—/✗).
 
 ## Logins in a private window
 
@@ -196,6 +224,7 @@ houston/
 ├── internal/
 │   ├── accounts/  usage/  launch/     accounts, quota probing, launching
 │   ├── oauth/  flock/  browse/        token refresh, cross-process locking, private-window logins
+│   ├── fleet/  jsonedit/              MCP/plugins/skills across accounts, surgical JSON patching
 │   ├── provision/                     multi-account layout (doctor: audit/repair)
 │   ├── statusline/                    status line: active account + everyone's quota
 │   ├── update/                        new-version notices + self-update (GitHub Releases)

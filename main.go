@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"houston/internal/accounts"
 	"houston/internal/browse"
+	"houston/internal/fleet"
 	"houston/internal/launch"
 	"houston/internal/model"
 	"houston/internal/provision"
@@ -46,6 +48,12 @@ func main() {
 		cmdOpenURL(args[1])
 	case len(args) > 0 && args[0] == "account":
 		cmdAccount(args[1:])
+	case len(args) > 0 && args[0] == "mcp":
+		cmdMCP(args[1:])
+	case len(args) > 0 && (args[0] == "plugin" || args[0] == "plugins"):
+		cmdPlugin(args[1:])
+	case len(args) > 0 && (args[0] == "skill" || args[0] == "skills"):
+		cmdSkill(args[1:])
 	case len(args) > 0 && args[0] == "run":
 		cmdRun(args[1:])
 	case len(args) > 0 && args[0] == "update":
@@ -134,6 +142,313 @@ func cmdAccount(args []string) {
 	default:
 		fmt.Fprintln(os.Stderr, "usage: houston account [add <label> | ls | rm <id>]")
 		os.Exit(1)
+	}
+}
+
+// --- fleet: MCP / plugins / skills across every account --------------------
+
+// loadFleet returns the registered accounts or exits with guidance.
+func loadFleet() []accounts.Account {
+	accs, err := accounts.Load()
+	if err != nil || len(accs) == 0 {
+		fmt.Fprintln(os.Stderr, "houston: no accounts; add one with 'houston account add'")
+		os.Exit(1)
+	}
+	return accs
+}
+
+// cmdMCP manages user-scope MCP servers across every account. add/add-json
+// pass through to the real `claude mcp` once (full flag parity, real
+// validation) against the first account, then the resulting diff of its
+// .claude.json mcpServers is copied into every other account.
+//
+//	houston mcp add <name> [claude mcp add flags/args...]
+//	houston mcp add-json <name> '<json>'
+//	houston mcp rm <name>
+//	houston mcp ls
+func cmdMCP(args []string) {
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	accs := loadFleet()
+	switch sub {
+	case "add", "add-json":
+		// The propagated scope is the USER scope (each account's .claude.json);
+		// local/project scopes are per-directory and need no propagation.
+		for i, a := range args {
+			if (a == "-s" || a == "--scope") && i+1 < len(args) && args[i+1] != "user" {
+				fmt.Fprintln(os.Stderr, "houston: only user-scope servers propagate across accounts; for local/project scope use claude directly")
+				os.Exit(1)
+			}
+		}
+		claudeArgs := append([]string{"mcp", sub, "--scope", "user"}, args[1:]...)
+		src := accs[0]
+		before, err := fleet.MCPServers(src)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "houston:", err)
+			os.Exit(1)
+		}
+		if err := fleet.RunClaude(src, claudeArgs...); err != nil {
+			os.Exit(1) // claude already printed why
+		}
+		after, _ := fleet.MCPServers(src)
+		changed, removed := fleet.Diff(before, after)
+		if len(changed) == 0 && len(removed) == 0 {
+			fmt.Println("houston: claude made no user-scope change; nothing to propagate")
+			return
+		}
+		for _, a := range accs[1:] {
+			if err := fleet.PatchMCP(a, changed, removed); err != nil {
+				fmt.Fprintf(os.Stderr, "houston: %s: %v\n", a.ID, err)
+				os.Exit(1)
+			}
+		}
+		for _, k := range fleet.Keys(changed) {
+			fmt.Printf("✓ mcp server %q propagated to all %d accounts\n", k, len(accs))
+		}
+	case "rm", "remove":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: houston mcp rm <name>")
+			os.Exit(1)
+		}
+		name := args[1]
+		for _, a := range accs {
+			if err := fleet.PatchMCP(a, nil, []string{name}); err != nil {
+				fmt.Fprintf(os.Stderr, "houston: %s: %v\n", a.ID, err)
+				os.Exit(1)
+			}
+		}
+		fmt.Printf("✓ mcp server %q removed from all %d accounts\n", name, len(accs))
+	case "ls", "list", "":
+		perAcc := make([]map[string]json.RawMessage, len(accs))
+		for i, a := range accs {
+			perAcc[i], _ = fleet.MCPServers(a)
+		}
+		names := fleet.Keys(perAcc...)
+		if len(names) == 0 {
+			fmt.Println("no user-scope MCP servers. Add one:  houston mcp add <name> -- <command>")
+			return
+		}
+		printFleetTable("MCP SERVER", names, accs, func(name string, i int) string {
+			if _, ok := perAcc[i][name]; ok {
+				return "✓"
+			}
+			return "—"
+		})
+	default:
+		fmt.Fprintln(os.Stderr, "usage: houston mcp [add <name> ... | add-json <name> <json> | rm <name> | ls]")
+		os.Exit(1)
+	}
+}
+
+// cmdPlugin manages plugins across every account. Plugin FILES already land in
+// the shared store (the plugins dir is junctioned), so install/uninstall runs
+// once via the real `claude plugin`; what propagates is the ENABLEMENT
+// (settings.json → enabledPlugins) per account.
+//
+//	houston plugin add <plugin>[@<marketplace>]
+//	houston plugin rm <plugin>[@<marketplace>]
+//	houston plugin ls
+//	houston plugin marketplace <args...>   (runs once; marketplaces are shared)
+func cmdPlugin(args []string) {
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	accs := loadFleet()
+	switch sub {
+	case "add", "install", "i":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: houston plugin add <plugin>[@<marketplace>]")
+			os.Exit(1)
+		}
+		spec := args[1]
+		src := accs[0]
+		before, _ := fleet.EnabledPlugins(src)
+		if err := fleet.RunClaude(src, "plugin", "install", spec); err != nil {
+			os.Exit(1)
+		}
+		after, _ := fleet.EnabledPlugins(src)
+		changed, removed := fleet.Diff(before, after)
+		if len(changed) == 0 && len(removed) == 0 {
+			// already installed+enabled in the source account: propagate its
+			// current entries for this spec so the others still catch up.
+			for _, k := range fleet.MatchPluginKeys(spec, fleet.Keys(after)) {
+				changed[k] = after[k]
+			}
+		}
+		if len(changed) == 0 && len(removed) == 0 {
+			fmt.Println("houston: nothing to propagate (claude did not enable the plugin?)")
+			return
+		}
+		for _, a := range accs[1:] {
+			if err := fleet.PatchPlugins(a, changed, removed); err != nil {
+				fmt.Fprintf(os.Stderr, "houston: %s: %v\n", a.ID, err)
+				os.Exit(1)
+			}
+		}
+		for _, k := range fleet.Keys(changed) {
+			fmt.Printf("✓ plugin %q enabled in all %d accounts (files live in the shared store)\n", k, len(accs))
+		}
+	case "rm", "uninstall", "remove":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: houston plugin rm <plugin>[@<marketplace>]")
+			os.Exit(1)
+		}
+		spec := args[1]
+		perAcc := make([]map[string]json.RawMessage, len(accs))
+		for i, a := range accs {
+			perAcc[i], _ = fleet.EnabledPlugins(a)
+		}
+		keys := fleet.MatchPluginKeys(spec, fleet.Keys(perAcc...))
+		if len(keys) == 0 {
+			fmt.Fprintf(os.Stderr, "houston: no account has a plugin matching %q\n", spec)
+			os.Exit(1)
+		}
+		// Uninstall the files once (best effort — the entry may exist without
+		// files), then drop the enablement everywhere.
+		_ = fleet.RunClaude(accs[0], "plugin", "uninstall", spec)
+		for _, a := range accs {
+			if err := fleet.PatchPlugins(a, nil, keys); err != nil {
+				fmt.Fprintf(os.Stderr, "houston: %s: %v\n", a.ID, err)
+				os.Exit(1)
+			}
+		}
+		for _, k := range keys {
+			fmt.Printf("✓ plugin %q removed from all %d accounts\n", k, len(accs))
+		}
+	case "ls", "list", "":
+		perAcc := make([]map[string]json.RawMessage, len(accs))
+		for i, a := range accs {
+			perAcc[i], _ = fleet.EnabledPlugins(a)
+		}
+		names := fleet.Keys(perAcc...)
+		if len(names) == 0 {
+			fmt.Println("no plugins enabled. Add one:  houston plugin add <plugin>@<marketplace>")
+			return
+		}
+		printFleetTable("PLUGIN", names, accs, func(name string, i int) string {
+			raw, ok := perAcc[i][name]
+			switch {
+			case !ok:
+				return "—"
+			case string(raw) == "true":
+				return "✓"
+			default:
+				return "✗" // present but disabled
+			}
+		})
+	case "marketplace":
+		// Marketplaces live inside the shared plugins dir: adding one in any
+		// account makes it visible everywhere, so a single passthrough is enough.
+		if err := fleet.RunClaude(accs[0], append([]string{"plugin", "marketplace"}, args[1:]...)...); err != nil {
+			os.Exit(1)
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "usage: houston plugin [add <plugin> | rm <plugin> | ls | marketplace <args...>]")
+		os.Exit(1)
+	}
+}
+
+// cmdSkill manages skills in the SHARED store — every account sees them
+// through its junction, so installing once is already fleet-wide.
+//
+//	houston skill add <git-url|local-dir> [--path <subdir>] [--ref <ref>] [--name <n>] [--force]
+//	houston skill rm <name>
+//	houston skill ls
+func cmdSkill(args []string) {
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "add", "install":
+		var s fleet.SkillSource
+		force := false
+		rest := args[1:]
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--path":
+				i++
+				if i < len(rest) {
+					s.Path = rest[i]
+				}
+			case "--ref":
+				i++
+				if i < len(rest) {
+					s.Ref = rest[i]
+				}
+			case "--name":
+				i++
+				if i < len(rest) {
+					s.Name = rest[i]
+				}
+			case "--force", "-f":
+				force = true
+			default:
+				if s.URL == "" && s.Local == "" {
+					if fi, err := os.Stat(rest[i]); err == nil && fi.IsDir() {
+						s.Local = rest[i]
+					} else {
+						s.URL = rest[i]
+					}
+				}
+			}
+		}
+		if s.URL == "" && s.Local == "" {
+			fmt.Fprintln(os.Stderr, "usage: houston skill add <git-url|local-dir> [--path <subdir>] [--ref <ref>] [--name <n>] [--force]")
+			os.Exit(1)
+		}
+		dst, err := fleet.InstallSkill(s, force)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "houston:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✓ skill installed → %s (shared: every account sees it)\n", dst)
+	case "rm", "remove":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: houston skill rm <name>")
+			os.Exit(1)
+		}
+		if err := fleet.RemoveSkill(args[1]); err != nil {
+			fmt.Fprintln(os.Stderr, "houston:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✓ skill %q removed (fleet-wide: the dir is shared)\n", args[1])
+	case "ls", "list", "":
+		names, err := fleet.ListSkills()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "houston:", err)
+			os.Exit(1)
+		}
+		if len(names) == 0 {
+			fmt.Println("no skills in the shared store. Add one:  houston skill add <git-url|dir>")
+			return
+		}
+		fmt.Printf("shared skills (%s):\n", fleet.SkillsDir())
+		for _, n := range names {
+			fmt.Println("  " + n)
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "usage: houston skill [add <source> | rm <name> | ls]")
+		os.Exit(1)
+	}
+}
+
+// printFleetTable renders one row per item with a ✓/—/✗ cell per account.
+func printFleetTable(header string, names []string, accs []accounts.Account, cell func(name string, acc int) string) {
+	fmt.Printf("%-28s", header)
+	for _, a := range accs {
+		fmt.Printf(" %-12s", trunc(a.ID, 12))
+	}
+	fmt.Println()
+	for _, n := range names {
+		fmt.Printf("%-28s", trunc(n, 28))
+		for i := range accs {
+			fmt.Printf(" %-12s", cell(n, i))
+		}
+		fmt.Println()
 	}
 }
 
