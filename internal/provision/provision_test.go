@@ -94,6 +94,68 @@ func TestFixIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestResyncSettingsOverwrites(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	shared := filepath.Join(home, "shared")
+	t.Setenv("HOUSTON_SHARED_DIR", shared)
+	t.Setenv("HOUSTON_ACCOUNTS_DIR", filepath.Join(home, "accounts"))
+
+	accs := []accounts.Account{{ID: "work"}}
+	cd := accs[0].ResolveConfigDir()
+	if err := os.MkdirAll(cd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(shared, "settings.json"), []byte(`{"v":"new"}`), 0o644)
+	os.WriteFile(filepath.Join(cd, "settings.json"), []byte(`{"v":"old"}`), 0o644)
+
+	res, err := ResyncSettings(accs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Created) != 1 {
+		t.Fatalf("expected 1 copied file, got %+v", res)
+	}
+	b, _ := os.ReadFile(filepath.Join(cd, "settings.json"))
+	if string(b) != `{"v":"new"}` {
+		t.Errorf("per-account settings should be overwritten with the shared copy, got %s", b)
+	}
+	// the diverged original survives as .bak — a resync is never silent data loss
+	bak, err := os.ReadFile(filepath.Join(cd, "settings.json.bak"))
+	if err != nil || string(bak) != `{"v":"old"}` {
+		t.Errorf("overwritten settings should be kept as .bak, got %q err=%v", bak, err)
+	}
+
+	// second pass: identical content → no copy, no new .bak
+	res2, err := ResyncSettings(accs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res2.Created) != 0 {
+		t.Errorf("identical files should be skipped, got %+v", res2.Created)
+	}
+}
+
+func TestResyncSettingsSkipsMissingDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOUSTON_SHARED_DIR", filepath.Join(home, "shared"))
+	t.Setenv("HOUSTON_ACCOUNTS_DIR", filepath.Join(home, "accounts"))
+
+	res, err := ResyncSettings([]accounts.Account{{ID: "ghost"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Skipped) != 1 {
+		t.Fatalf("account without config dir should be skipped, got %+v", res)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

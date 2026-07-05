@@ -234,7 +234,9 @@ func findAccount(accs []accounts.Account, id string) (accounts.Account, bool) {
 // printAccountsTable shows every account with its email + current usage before
 // handing the terminal to claude, marking (→) the one being launched.
 func printAccountsTable(probes []usage.Probe, bestID string) {
-	fmt.Fprintln(os.Stderr, "Claude accounts — usage (5h / 7d):")
+	// Pressure is shown next to the raw windows: it's the number the choice is
+	// actually made on, and seeing it exposes a bad ranking at a glance.
+	fmt.Fprintln(os.Stderr, "Claude accounts — usage (5h / 7d → pressure):")
 	for _, p := range probes {
 		mark := "  "
 		if p.Account.ID == bestID {
@@ -246,7 +248,7 @@ func printAccountsTable(probes []usage.Probe, bestID string) {
 		}
 		use := "    —  /   —"
 		if p.OK {
-			use = fmt.Sprintf("%4.0f%% / %4.0f%%", p.U5, p.U7)
+			use = fmt.Sprintf("%4.0f%% / %4.0f%%  → %3.0f%%", p.U5, p.U7, p.Pressure)
 		}
 		fmt.Fprintf(os.Stderr, "%s%-8s %-34s %s\n", mark, p.Account.ID, trunc(email, 34), use)
 	}
@@ -380,10 +382,13 @@ func cmdUpdate(args []string) {
 // --- doctor: audit & repair the multi-account layout ----------------------
 
 func cmdDoctor(args []string) {
-	fix := false
+	fix, resync := false, false
 	for _, a := range args {
-		if a == "--fix" || a == "fix" || a == "-f" {
+		switch a {
+		case "--fix", "fix", "-f":
 			fix = true
+		case "--resync-settings":
+			resync = true
 		}
 	}
 	accs, _ := accounts.Load()
@@ -426,6 +431,25 @@ func cmdDoctor(args []string) {
 
 	if n := update.Notice(version, 3*time.Second); n != "" {
 		fmt.Println("\nhouston: " + n)
+	}
+	if resync {
+		// settings.json/mcp.json are seeded (copied), not linked — edits to the
+		// shared file don't propagate on their own. This is the propagation step.
+		fmt.Println("\nResyncing settings from the shared store…")
+		res, err := provision.ResyncSettings(accs)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "houston: resync failed:", err)
+			os.Exit(1)
+		}
+		for _, c := range res.Created {
+			fmt.Println("  + " + c)
+		}
+		for _, s := range res.Skipped {
+			fmt.Println("  ! " + s)
+		}
+		if len(res.Created) == 0 && len(res.Skipped) == 0 {
+			fmt.Println("  (nothing to copy — no seed files in the shared store)")
+		}
 	}
 	if !fix {
 		if drift {

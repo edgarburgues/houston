@@ -14,21 +14,23 @@ func TestWeightedPressure(t *testing.T) {
 	at5 := now              // f5 = 0 (resetting now)
 
 	cases := []struct {
-		name           string
-		u5, u7         float64
-		r5, r7         time.Time
-		want           float64
+		name   string
+		u5, u7 float64
+		r5, r7 time.Time
+		want   float64
 	}{
-		// both windows full-weight → plain average
-		{"both full", 10, 20, full5, full7, 15},
-		// 5h resetting now → ignored, only 7d counts
+		// both windows full-weight → the bottleneck window sets the pressure
+		{"both full", 10, 20, full5, full7, 20},
+		// 5h resetting now → contributes nothing, only 7d counts
 		{"5h at reset", 100, 20, at5, full7, 20},
 		// a high 5h about to reset is discounted vs a modest 7d far out
 		{"discount near-reset", 90, 10, at5, full7, 10},
-		// no reset info → falls back to max(u5,u7)
+		// no reset info → used windows count in full (conservative)
 		{"unknown resets", 10, 20, time.Time{}, time.Time{}, 20},
-		// 5h saturated AND far from reset → can't be averaged below its own value
-		// (account is unusable now), so it dominates the modest 7d.
+		// untouched window with unknown reset (resets_at null) = pure headroom
+		{"idle 5h unknown reset", 0, 20, time.Time{}, full7, 20},
+		// 5h saturated AND far from reset → can't be discounted below its own
+		// value (account is unusable now), so it dominates the modest 7d.
 		{"saturated 5h dominates", 100, 10, full5, full7, 100},
 	}
 	for _, c := range cases {
@@ -51,6 +53,45 @@ func TestSaturationGuardUsesAbsoluteTime(t *testing.T) {
 	// averaging below the saturated value is allowed.
 	if got := weightedPressure(95, 10, now.Add(10*time.Minute), full7, now); got >= saturated {
 		t.Errorf("saturated but about to reset should not dominate, got %.1f", got)
+	}
+}
+
+// TestIdleAccountRanksFirst is the production regression that motivated the
+// bottleneck-window formula: an idle account (5h untouched → resets_at null)
+// whose week resets in minutes must rank BELOW every loaded account. With the
+// old normalized average it collapsed to u7 (73%) and systematically lost to
+// the most loaded account of the pool.
+func TestIdleAccountRanksFirst(t *testing.T) {
+	now := time.Date(2026, 7, 4, 23, 56, 0, 0, time.UTC)
+	// real probe data captured on 2026-07-04 (work1/work2/work3)
+	w1 := weightedPressure(15, 41, now.Add(1*time.Hour+54*time.Minute), now.Add(5*time.Hour+4*time.Minute), now)
+	w2 := weightedPressure(0, 73, time.Time{}, now.Add(64*time.Minute), now)
+	w3 := weightedPressure(26, 11, now.Add(3*time.Hour+20*time.Minute), now.Add(142*time.Hour), now)
+	if !(w2 < w1 && w1 < w3) {
+		t.Fatalf("ranking should be idle w2 < w1 < w3, got w1=%.1f w2=%.1f w3=%.1f", w1, w2, w3)
+	}
+	// (b) a high weekly with an imminent reset must not dominate the pressure
+	if w2 > 5 {
+		t.Errorf("73%% weekly resetting in 64min should attenuate to ~0.5, got %.1f", w2)
+	}
+}
+
+// TestPickBestTieBreak: near-equal pressures (within tieBand) alternate by
+// least-recently-used instead of always picking the same account.
+func TestPickBestTieBreak(t *testing.T) {
+	probes := []Probe{
+		{Account: accounts.Account{ID: "a", LastUse: "2026-07-04T10:00:00Z"}, Pressure: 10.0, OK: true},
+		{Account: accounts.Account{ID: "b", LastUse: "2026-07-03T10:00:00Z"}, Pressure: 11.5, OK: true},
+		{Account: accounts.Account{ID: "c", LastUse: ""}, Pressure: 30.0, OK: true},
+	}
+	// a and b are tied (Δ1.5 < 2): the least-recently-used (b) wins; c is out.
+	if got := pickBest(probes); got.ID != "b" {
+		t.Fatalf("tie should go to least-recently-used 'b', got %q", got.ID)
+	}
+	// clear winner outside the band: pressure decides, LastUse irrelevant
+	probes[1].Pressure = 20.0
+	if got := pickBest(probes); got.ID != "a" {
+		t.Fatalf("clear minimum 'a' should win, got %q", got.ID)
 	}
 }
 

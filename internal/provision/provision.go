@@ -223,6 +223,51 @@ func Fix(accs []accounts.Account) (FixResult, error) {
 	return res, nil
 }
 
+// ResyncSettings force-copies the shared seed files (settings.json, mcp.json)
+// into every account, OVERWRITING the per-account copies. Settings are seeded
+// (copied), not linked — each account keeps its own file so they *can*
+// diverge — which means edits to the shared file never propagate on their
+// own; this is the explicit propagation step (`houston doctor
+// --resync-settings`).
+func ResyncSettings(accs []accounts.Account) (FixResult, error) {
+	var res FixResult
+	shared := SharedDir()
+	for _, a := range accs {
+		cd := a.ResolveConfigDir()
+		if cd == "" || !isDir(cd) {
+			res.Skipped = append(res.Skipped, "account-"+a.ID+": config dir missing (run doctor --fix first)")
+			continue
+		}
+		for _, f := range seedFiles {
+			src := filepath.Join(shared, f)
+			if !fileExists(src) {
+				continue
+			}
+			b, err := os.ReadFile(src)
+			if err != nil {
+				return res, err
+			}
+			dst := filepath.Join(cd, f)
+			// Per-account settings may have diverged on purpose (model, plugins,
+			// effort...): skip identical files, and keep a .bak of anything this
+			// overwrites so a resync is never a silent data loss.
+			if old, err := os.ReadFile(dst); err == nil {
+				if string(old) == string(b) {
+					continue
+				}
+				if err := os.WriteFile(dst+".bak", old, 0o644); err != nil {
+					return res, err
+				}
+			}
+			if err := os.WriteFile(dst, b, 0o644); err != nil {
+				return res, err
+			}
+			res.Created = append(res.Created, "account-"+a.ID+"/"+f+" ← shared (previous kept as "+f+".bak)")
+		}
+	}
+	return res, nil
+}
+
 // --- helpers ---------------------------------------------------------------
 
 func classify(link, target string) LinkState {

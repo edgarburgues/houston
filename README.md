@@ -90,6 +90,7 @@ on the PATH. To search/resume conversations, use `houston`.
 | `houston account rm <id>` | removes an account |
 | `houston doctor` | audits the layout (links, logins, unshared dirs) |
 | `houston doctor --fix` | repairs the layout idempotently (never clobbers data) |
+| `houston doctor --resync-settings` | re-copies the shared `settings.json`/`mcp.json` into every account (settings are seeded, not linked) |
 | `houston version` | prints the version and warns if a newer one exists |
 | `houston update` | self-updates the binary from GitHub Releases (verifies SHA-256, asks first) |
 | `houston update --check` | only checks; reports whether a newer version exists |

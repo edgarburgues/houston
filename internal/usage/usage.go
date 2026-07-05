@@ -1,10 +1,13 @@
 // Package usage probes Anthropic's OAuth usage endpoint to balance accounts by
-// quota pressure, and selects the best account to launch. Pressure weights each
-// quota window (5h, 7d) by how much of its period is still left before it resets,
-// so a window about to renew barely counts (its load frees up imminently) and one
-// far from reset counts fully — favouring the account with the most sustained
-// headroom. If probing fails (e.g. a long-lived token can't query usage), it
-// degrades gracefully to least-recently-used balancing.
+// quota pressure, and selects the best account to launch. Pressure is the
+// EFFECTIVE LOAD of the bottleneck window: each window (5h, 7d) contributes its
+// utilization attenuated by how much of its period is left before the reset —
+// a window about to renew barely counts (its load frees up imminently), one far
+// from reset counts fully — and the account's pressure is the worse of the two.
+// The weights are absolute on purpose: a normalized average would cancel the
+// attenuation (a tiny weight surviving as a 100% relative share) and rank an
+// idle account below a loaded one. If probing fails (e.g. a long-lived token
+// can't query usage), it degrades gracefully to least-recently-used balancing.
 package usage
 
 import (
@@ -135,24 +138,32 @@ func blockedFor(reset, now time.Time) bool {
 	return !reset.IsZero() && reset.Sub(now) > saturationGrace
 }
 
-// weightedPressure blends the 5h and 7d utilizations, weighting each by how much
-// of its period is still left before it resets (a window about to reset barely
-// counts; one far from reset counts fully). Falls back to max(u5,u7) when neither
-// reset time is known.
+// effLoad is one window's effective load: its utilization attenuated by how
+// much of the period remains before the reset (a window about to reset barely
+// counts; one far from reset counts in full). Unknown reset (resets_at null):
+// an untouched window (0%) is pure headroom and contributes nothing, and a
+// window with usage counts in full — conservative, since we can't know how
+// soon it frees up.
+func effLoad(u float64, reset, now time.Time, period time.Duration) float64 {
+	if reset.IsZero() {
+		return u
+	}
+	return remainingFraction(reset, now, period) * u
+}
+
+// weightedPressure is the effective load of the bottleneck window: the worse
+// of the two windows' attenuated utilizations. The weights stay ABSOLUTE —
+// the previous normalized average `(f5·u5+f7·u7)/(f5+f7)` turned them into
+// relative shares, so an idle account (5h window untouched → resets_at null →
+// f5=0) collapsed to exactly u7 even with the weekly reset minutes away, and
+// the freshest account in the pool systematically ranked last.
 //
 // Guard: a window that is both saturated AND not resetting within
-// saturationGrace is a real bottleneck, so the blend can't average it away
-// below its own value — otherwise an account maxed on 5h (unusable now) but
-// idle on 7d could outrank a steady one.
+// saturationGrace is a real bottleneck, so the attenuation can't discount it
+// below its own value — an account maxed on 5h (unusable now) but idle on 7d
+// must not outrank a steady one.
 func weightedPressure(u5, u7 float64, r5, r7, now time.Time) float64 {
-	f5 := remainingFraction(r5, now, win5h)
-	f7 := remainingFraction(r7, now, win7d)
-	var p float64
-	if f5+f7 == 0 {
-		p = max(u5, u7)
-	} else {
-		p = (f5*u5 + f7*u7) / (f5 + f7)
-	}
+	p := max(effLoad(u5, r5, now, win5h), effLoad(u7, r7, now, win7d))
 	if u5 >= saturated && blockedFor(r5, now) {
 		p = max(p, u5)
 	}
@@ -277,11 +288,28 @@ func Best(accs []accounts.Account, timeout time.Duration) (accounts.Account, []P
 		}
 	}
 	if len(ok) > 0 {
-		sort.SliceStable(ok, func(i, j int) bool { return ok[i].Pressure < ok[j].Pressure })
-		return ok[0].Account, probes, nil
+		return pickBest(ok), probes, nil
 	}
 	// fallback: least-recently-used (empty LastUse = never used = preferred)
 	return lruFirst(accs), probes, nil
+}
+
+// tieBand: probes within this many pressure points of the minimum count as
+// tied, and ties go to the least-recently-used account — so equally free
+// accounts alternate instead of the same one soaking up every launch.
+const tieBand = 2.0
+
+// pickBest chooses among successful probes: lowest pressure, near-ties broken
+// by least-recently-used. Caller guarantees len(ok) > 0.
+func pickBest(ok []Probe) accounts.Account {
+	sort.SliceStable(ok, func(i, j int) bool { return ok[i].Pressure < ok[j].Pressure })
+	tied := make([]accounts.Account, 0, len(ok))
+	for _, p := range ok {
+		if p.Pressure <= ok[0].Pressure+tieBand {
+			tied = append(tied, p.Account)
+		}
+	}
+	return lruFirst(tied)
 }
 
 // lruFirst returns the least-recently-used account (empty LastUse = never used,
