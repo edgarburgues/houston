@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"houston/internal/accounts"
+	"houston/internal/browse"
 	"houston/internal/launch"
 	"houston/internal/model"
 	"houston/internal/provision"
@@ -36,6 +37,13 @@ func main() {
 		update.CleanupStale(exe)
 	}
 	switch {
+	case len(args) == 1 && browse.IsHTTP(browse.CleanURL(args[0])):
+		// $BROWSER mode: the claude child launched by Houston has BROWSER set
+		// to this very binary (see launch.Cmd), so every link claude opens —
+		// the OAuth login page included — arrives here as a single URL arg.
+		cmdOpenURL(args[0])
+	case len(args) == 2 && args[0] == "open-url":
+		cmdOpenURL(args[1])
 	case len(args) > 0 && args[0] == "account":
 		cmdAccount(args[1:])
 	case len(args) > 0 && args[0] == "run":
@@ -55,6 +63,16 @@ func main() {
 		fmt.Println(statusline.Line(os.Stdin, os.Getenv("CLAUDE_CONFIG_DIR")))
 	default:
 		cmdTUI(args)
+	}
+}
+
+// cmdOpenURL implements $BROWSER mode / `houston open-url <url>`: Anthropic
+// OAuth pages open in a private window of the default browser, anything else
+// opens normally. HOUSTON_LOGIN_PRIVATE=off disables the private isolation.
+func cmdOpenURL(raw string) {
+	if err := browse.Open(raw); err != nil {
+		fmt.Fprintln(os.Stderr, "houston:", err)
+		os.Exit(1)
 	}
 }
 

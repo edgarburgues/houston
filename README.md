@@ -109,6 +109,21 @@ remove · `e` export · **`A` accounts** · `r` reindex · `?` help · `q` quit.
 ambiguous hyphens, dots or spaces) and launches `claude --resume` with the
 chosen account — goodbye "No conversation found".
 
+## Logins in a private window
+
+Claude Code honors `$BROWSER` as the opener for every URL it launches — the
+OAuth login page included. Houston sets `BROWSER` to itself for every `claude`
+it starts, so **Anthropic OAuth pages open in a private window of your default
+browser** (`--incognito` / `--inprivate` / `--private-window`, chosen by
+detecting the system's default browser). The login never inherits the
+claude.ai session already signed in in your normal browser — you pick the
+right account every time, which is the whole point of multi-account.
+
+Every other link claude opens keeps using your normal browser session.
+A `BROWSER` you set yourself is respected; `HOUSTON_LOGIN_PRIVATE=off`
+disables the isolation; an unrecognized default browser falls back to a
+normal open. Manual use: `houston open-url <url>`.
+
 ## Self-management: `houston doctor`
 
 The multi-account layout (shared store + one dir per account + links) can
@@ -179,7 +194,7 @@ houston/
 ├── LICENSE                MIT
 ├── internal/
 │   ├── accounts/  usage/  launch/     accounts, quota probing, launching
-│   ├── oauth/  flock/                 token refresh + cross-process locking
+│   ├── oauth/  flock/  browse/        token refresh, cross-process locking, private-window logins
 │   ├── provision/                     multi-account layout (doctor: audit/repair)
 │   ├── statusline/                    status line: active account + everyone's quota
 │   ├── update/                        new-version notices + self-update (GitHub Releases)

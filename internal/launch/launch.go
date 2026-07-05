@@ -43,8 +43,30 @@ func Cmd(configDir string, args []string, dir string) *exec.Cmd {
 	if configDir != "" {
 		c.Env = append(c.Env, "CLAUDE_CONFIG_DIR="+configDir)
 	}
+	// Route the child's link-opens through us: Claude Code honors $BROWSER as
+	// the opener for every URL — the OAuth login page included — invoking it
+	// with the URL as its only argument. With Houston as $BROWSER, login pages
+	// open in a PRIVATE browser window (no inherited claude.ai session, which
+	// matters when juggling several accounts) and every other link opens
+	// normally (see internal/browse). A BROWSER the user already set wins.
+	if !hasEnv(c.Env, "BROWSER") {
+		if self, err := os.Executable(); err == nil {
+			c.Env = append(c.Env, "BROWSER="+self)
+		}
+	}
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return c
+}
+
+// hasEnv reports whether the named variable is present (case-insensitive,
+// since Windows env names are case-insensitive).
+func hasEnv(env []string, name string) bool {
+	for _, e := range env {
+		if eq := strings.IndexByte(e, '='); eq >= 0 && strings.EqualFold(e[:eq], name) {
+			return true
+		}
+	}
+	return false
 }
 
 // stripEnv returns env without the named variables (case-insensitive, since
