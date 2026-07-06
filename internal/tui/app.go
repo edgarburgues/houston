@@ -21,6 +21,7 @@ import (
 	"houston/internal/model"
 	"houston/internal/resume"
 	"houston/internal/store"
+	"houston/internal/theme"
 	"houston/internal/usage"
 )
 
@@ -86,6 +87,7 @@ type Model struct {
 	width     int
 	height    int
 	ready     bool
+	lay       theme.Layout
 
 	// accounts screen
 	screen     screen
@@ -111,6 +113,7 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 		input:    ti,
 		focus:    focusMid,
 		status:   "Houston ready · / search · enter resume · ? help",
+		lay:      curLayout,
 	}
 	return m
 }
@@ -119,34 +122,74 @@ func (m Model) Init() tea.Cmd { return nil }
 
 // ---- styling ----
 
+// The palette and derived styles are package-level vars rebuilt exactly once
+// by applyTheme, before tea.NewProgram runs: the ~30 render call sites stay
+// untouched and reads are race-free because no frame exists yet. init seeds
+// them from theme.Default(), so tests (and anything else that never calls
+// Run) render exactly the pre-theme output.
 var (
-	cBlue   = lipgloss.Color("39")
-	cGrey   = lipgloss.Color("245")
-	cDim    = lipgloss.Color("240")
-	cGreen  = lipgloss.Color("42")
-	cYellow = lipgloss.Color("220")
-	cBg     = lipgloss.Color("236")
+	cBlue, cGrey, cDim, cGreen, cYellow, cBg lipgloss.Color
+
+	headerStyle, footerStyle, paneFocused, paneBlurred lipgloss.Style
+	selStyle, dimStyle, titleStyle, keyStyle           lipgloss.Style
+	labelStyle, valStyle, pinStyle, tagStyle           lipgloss.Style
+
+	// curLayout is copied by New into Model.lay, so pane math never reads
+	// mutable package state after startup.
+	curLayout theme.Layout
+)
+
+func init() { applyTheme(theme.Default()) }
+
+func applyTheme(t theme.Theme) {
+	cBlue = lipgloss.Color(t.Colors.Accent)
+	cGrey = lipgloss.Color(t.Colors.Grey)
+	cDim = lipgloss.Color(t.Colors.Dim)
+	cGreen = lipgloss.Color(t.Colors.Green)
+	cYellow = lipgloss.Color(t.Colors.Yellow)
+	cBg = lipgloss.Color(t.Colors.SelBg)
 
 	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(cBlue).Padding(0, 1)
 	footerStyle = lipgloss.NewStyle().Foreground(cGrey)
 	paneFocused = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cBlue)
 	paneBlurred = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cDim)
-	selStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(cBg).Bold(true)
-	dimStyle    = lipgloss.NewStyle().Foreground(cDim)
-	titleStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("231"))
-	keyStyle    = lipgloss.NewStyle().Foreground(cYellow)
-	labelStyle  = lipgloss.NewStyle().Foreground(cGrey)
-	valStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("231"))
-	pinStyle    = lipgloss.NewStyle().Foreground(cYellow)
-	tagStyle    = lipgloss.NewStyle().Foreground(cGreen)
-)
+	selStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(cBg).Bold(true)
+	dimStyle = lipgloss.NewStyle().Foreground(cDim)
+	titleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("231"))
+	keyStyle = lipgloss.NewStyle().Foreground(cYellow)
+	labelStyle = lipgloss.NewStyle().Foreground(cGrey)
+	valStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("231"))
+	pinStyle = lipgloss.NewStyle().Foreground(cYellow)
+	tagStyle = lipgloss.NewStyle().Foreground(cGreen)
+
+	curLayout = t.Layout
+}
 
 // ---- layout helpers ----
 
-func (m *Model) leftW() int  { return 26 }
-func (m *Model) rightW() int { w := m.width * 40 / 100; if w < 36 { w = 36 }; return w }
-func (m *Model) midW() int   { return m.width - m.leftW() - m.rightW() }
-func (m *Model) bodyH() int  { return m.height - 2 }
+// leftW clamps the themed width so a config typo can never squeeze the pane
+// unreadable or starve the mission list.
+func (m *Model) leftW() int {
+	w := m.lay.LeftWidth
+	if w < 16 {
+		w = 16
+	}
+	if w > 60 {
+		w = 60
+	}
+	return w
+}
+
+func (m *Model) rightW() int {
+	w := m.width * m.lay.RightPercent / 100
+	if w < m.lay.RightMin {
+		w = m.lay.RightMin
+	}
+	return w
+}
+
+func (m *Model) midW() int  { return m.width - m.leftW() - m.rightW() }
+func (m *Model) bodyH() int { return m.height - 2 }
 
 func clip(s string, w int) string {
 	if w <= 0 {
@@ -906,8 +949,11 @@ func (m Model) viewAccounts() string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
-// Run boots the program.
-func Run(root string, rescan func() ([]model.Mission, error), st *store.Store, missions []model.Mission) error {
+// Run boots the program. th is resolved by the caller (defaults merged with
+// config.json); applyTheme must run before tea.NewProgram so the one-time
+// style mutation can never race a render.
+func Run(root string, rescan func() ([]model.Mission, error), st *store.Store, missions []model.Mission, th theme.Theme) error {
+	applyTheme(th)
 	p := tea.NewProgram(New(root, rescan, st, missions), tea.WithAltScreen())
 	_, err := p.Run()
 	return err

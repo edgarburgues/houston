@@ -15,6 +15,7 @@ import (
 
 	"houston/internal/accounts"
 	"houston/internal/browse"
+	"houston/internal/config"
 	"houston/internal/fleet"
 	"houston/internal/launch"
 	"houston/internal/model"
@@ -22,6 +23,7 @@ import (
 	"houston/internal/scan"
 	"houston/internal/statusline"
 	"houston/internal/store"
+	"houston/internal/theme"
 	"houston/internal/tui"
 	"houston/internal/update"
 	"houston/internal/usage"
@@ -836,7 +838,10 @@ func cmdTUI(args []string) {
 		fmt.Fprintln(os.Stderr, "houston: scan failed:", err)
 		os.Exit(1)
 	}
-	if err := tui.Run(displayRoot, scanFn, st, missions); err != nil {
+	// User overrides only for now; enabled-module theme contributions join the
+	// chain (via theme.Resolve) once the module loader exists.
+	th := theme.Default().Merge(config.Load().Theme)
+	if err := tui.Run(displayRoot, scanFn, st, missions, th); err != nil {
 		fmt.Fprintln(os.Stderr, "houston:", err)
 		os.Exit(1)
 	}
