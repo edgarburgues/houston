@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 	"houston/internal/fleet"
 	"houston/internal/launch"
 	"houston/internal/model"
+	"houston/internal/module"
 	"houston/internal/provision"
 	"houston/internal/scan"
 	"houston/internal/statusline"
@@ -56,6 +60,8 @@ func main() {
 		cmdPlugin(args[1:])
 	case len(args) > 0 && (args[0] == "skill" || args[0] == "skills"):
 		cmdSkill(args[1:])
+	case len(args) > 0 && (args[0] == "module" || args[0] == "modules"):
+		cmdModule(args[1:])
 	case len(args) > 0 && args[0] == "run":
 		cmdRun(args[1:])
 	case len(args) > 0 && args[0] == "update":
@@ -454,6 +460,308 @@ func printFleetTable(header string, names []string, accs []accounts.Account, cel
 	}
 }
 
+// --- modules: exec'd extensions under <StoreDir>/modules -------------------
+
+// cmdModule manages Houston modules — reviewable directories of exec'd
+// handlers (internal/module). Installs are snapshots and always land
+// DISABLED: `enable` is the consent point where module code starts running.
+// (`module test` and `module log` arrive with the exec runner.)
+//
+//	houston module ls
+//	houston module add <path|git-url> [--name <n>] [--enable]
+//	houston module rm <name> [--yes]
+//	houston module enable <name>
+//	houston module disable <name>
+func cmdModule(args []string) {
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "ls", "list", "":
+		cmdModuleLs()
+	case "add", "install":
+		cmdModuleAdd(args[1:])
+	case "rm", "remove":
+		cmdModuleRm(args[1:])
+	case "enable", "disable":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "usage: houston module %s <name>\n", sub)
+			os.Exit(1)
+		}
+		name := args[1]
+		if err := module.SetEnabled(name, sub == "enable"); err != nil {
+			fmt.Fprintln(os.Stderr, "houston:", err)
+			os.Exit(1)
+		}
+		if sub == "enable" {
+			printEnableNotice(name)
+		} else {
+			fmt.Printf("module %q disabled\n", name)
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "usage: houston module [ls | add <path|git-url> [--name <n>] [--enable] | rm <name> [--yes] | enable <name> | disable <name>]")
+		os.Exit(1)
+	}
+}
+
+func cmdModuleLs() {
+	mods, errs := module.LoadAll(config.Load())
+	if len(mods) == 0 && len(errs) == 0 {
+		fmt.Println("no modules installed. Add one:  houston module add <path|git-url>")
+		return
+	}
+	if len(mods) > 0 {
+		fmt.Printf("%-24s %-10s %-8s %s\n", "NAME", "VERSION", "ENABLED", "SURFACES")
+		for _, m := range mods {
+			version := m.Manifest.Version
+			if version == "" {
+				version = "—"
+			}
+			enabled := "no"
+			if m.Enabled {
+				enabled = "yes"
+			}
+			fmt.Printf("%-24s %-10s %-8s %s\n", trunc(m.Name, 24), trunc(version, 10), enabled, surfacesSummary(m.Manifest))
+		}
+	}
+	for _, w := range shadowedKeys(mods) {
+		fmt.Println("  ! " + w)
+	}
+	for _, e := range errs {
+		fmt.Println("  ✗ " + e.Error())
+	}
+}
+
+func cmdModuleAdd(args []string) {
+	src, name := "", ""
+	enable := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--name":
+			i++
+			if i < len(args) {
+				name = args[i]
+			}
+		case "--enable":
+			enable = true
+		default:
+			if src == "" {
+				src = args[i]
+			}
+		}
+	}
+	if src == "" {
+		fmt.Fprintln(os.Stderr, "usage: houston module add <path|git-url> [--name <n>] [--enable]")
+		os.Exit(1)
+	}
+	fi, err := os.Stat(src)
+	localDir := err == nil && fi.IsDir()
+	if enable && !localDir {
+		// Installing code from a URL must not arm it in the same breath;
+		// --enable is for directories you wrote yourself.
+		fmt.Fprintln(os.Stderr, "houston: --enable is refused for git sources; review the installed files first, then run 'houston module enable <name>'")
+		os.Exit(1)
+	}
+	e, err := module.Add(src, name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "houston:", err)
+		os.Exit(1)
+	}
+	dir := filepath.Join(module.Dir(), e.Name)
+	fmt.Printf("✓ module %q installed (disabled) → %s\n", e.Name, dir)
+	// Re-read the landed manifest: what gets printed is what got installed.
+	var man module.Manifest
+	if b, err := os.ReadFile(filepath.Join(dir, "module.json")); err == nil {
+		man, _ = module.ParseManifest(b)
+	}
+	if man.Version != "" {
+		fmt.Println("  version:     " + man.Version)
+	}
+	if man.Description != "" {
+		fmt.Println("  description: " + man.Description)
+	}
+	if cmds := manifestCommands(man); len(cmds) > 0 {
+		fmt.Println("  commands it will run (review before enabling):")
+		for _, c := range cmds {
+			fmt.Printf("    %-32s %q\n", c.label, c.argv)
+		}
+	}
+	for _, w := range commandWarnings(man, dir) {
+		fmt.Println("  warning: " + w)
+	}
+	if enable {
+		if err := module.SetEnabled(e.Name, true); err != nil {
+			fmt.Fprintln(os.Stderr, "houston:", err)
+			os.Exit(1)
+		}
+		printEnableNotice(e.Name)
+		return
+	}
+	fmt.Printf("  enable with:  houston module enable %s\n", e.Name)
+}
+
+func cmdModuleRm(args []string) {
+	name, yes := "", false
+	for _, a := range args {
+		switch a {
+		case "--yes", "-y":
+			yes = true
+		default:
+			if name == "" {
+				name = a
+			}
+		}
+	}
+	if name == "" {
+		fmt.Fprintln(os.Stderr, "usage: houston module rm <name> [--yes]")
+		os.Exit(1)
+	}
+	// Validate before prompting; Remove re-validates before any filesystem op.
+	if err := module.SafeName(name); err != nil {
+		fmt.Fprintln(os.Stderr, "houston:", err)
+		os.Exit(1)
+	}
+	if !yes {
+		fmt.Printf("Remove module %q and its files? [y/N]: ", name)
+		resp, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		switch strings.ToLower(strings.TrimSpace(resp)) {
+		case "y", "yes":
+		default:
+			fmt.Println("Cancelled. Nothing was changed.")
+			return
+		}
+	}
+	if err := module.Remove(name); err != nil {
+		fmt.Fprintln(os.Stderr, "houston:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("module %q removed\n", name)
+}
+
+// printEnableNotice is the security-model notice shown at the consent point:
+// everything after `enable` is advisory.
+func printEnableNotice(name string) {
+	fmt.Printf("module %q enabled\n\n", name)
+	fmt.Println("Security notice — what enabling means:")
+	fmt.Println("  • This module now runs arbitrary code as your user: at TUI start, on")
+	fmt.Println("    every mission rescan, and on every statusline render.")
+	fmt.Println("  • From here on enablement is advisory: an enabled module can rewrite")
+	fmt.Println("    modules.json, other modules, config.json, caches, or the Houston")
+	fmt.Println("    binary itself. Timeouts, output caps, ANSI stripping and symlink")
+	fmt.Println("    rejection are robustness features, not a sandbox.")
+	fmt.Println("  • Payloads sent to its handlers include mission titles (for unnamed")
+	fmt.Println("    sessions that is your first prompt), cwd paths, and this module's")
+	fmt.Println("    settings from config.json (which may hold tokens).")
+	fmt.Printf("Review the code in %s\n", filepath.Join(module.Dir(), name))
+	fmt.Printf("Disable with:  houston module disable %s\n", name)
+}
+
+// surfacesSummary compresses what a manifest contributes into one cell.
+func surfacesSummary(man module.Manifest) string {
+	var parts []string
+	if n := len(man.Actions); n > 0 {
+		parts = append(parts, fmt.Sprintf("actions:%d", n))
+	}
+	if man.Transforms.Missions != nil {
+		parts = append(parts, "transform")
+	}
+	if man.Transforms.Preview != nil {
+		parts = append(parts, "preview")
+	}
+	if man.Statusline != nil {
+		parts = append(parts, "statusline")
+	}
+	if man.Theme != nil {
+		parts = append(parts, "theme")
+	}
+	if len(parts) == 0 {
+		return "—"
+	}
+	return strings.Join(parts, " ")
+}
+
+// shadowedKeys reports action keys claimed by more than one enabled module:
+// at runtime the first claimant in lexicographic name order wins and later
+// ones are dropped. Built-in TUI keys join this check once the TUI exports
+// its key tables.
+func shadowedKeys(mods []module.Module) []string {
+	owner := map[string]string{}
+	var out []string
+	for _, m := range mods {
+		if !m.Enabled {
+			continue
+		}
+		for _, a := range m.Manifest.Actions {
+			k := a.Screen + ":" + a.Key
+			if by, taken := owner[k]; taken {
+				out = append(out, fmt.Sprintf("%s: action %q key %q (%s) is shadowed by module %s", m.Name, a.ID, a.Key, a.Screen, by))
+				continue
+			}
+			owner[k] = m.Name
+		}
+	}
+	return out
+}
+
+// modCommand is one declared command array with a human label, for the add
+// transparency printout and doctor's static checks.
+type modCommand struct {
+	label string
+	argv  []string
+}
+
+func manifestCommands(man module.Manifest) []modCommand {
+	var out []modCommand
+	for _, a := range man.Actions {
+		label := fmt.Sprintf("action %s (%s, %s)", a.ID, a.Key, a.Screen)
+		if a.Interactive {
+			label += " interactive"
+		}
+		out = append(out, modCommand{label, a.Command})
+	}
+	if h := man.Transforms.Missions; h != nil {
+		out = append(out, modCommand{"transforms.missions", h.Command})
+	}
+	if h := man.Transforms.Preview; h != nil {
+		out = append(out, modCommand{"transforms.preview", h.Command})
+	}
+	if s := man.Statusline; s != nil {
+		out = append(out, modCommand{"statusline", s.Command})
+	}
+	return out
+}
+
+// commandWarnings runs the static, zero-exec checks on a module's declared
+// commands: a bare command[0] should resolve on PATH (warning only — PATH may
+// differ at runtime) and a relative command[0] must exist inside the module
+// dir. Absolute and escaping paths never get this far — manifest validation
+// rejects them.
+func commandWarnings(man module.Manifest, dir string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, c := range manifestCommands(man) {
+		if len(c.argv) == 0 {
+			continue
+		}
+		head := c.argv[0]
+		if !strings.ContainsAny(head, `/\`) {
+			if seen[head] {
+				continue
+			}
+			seen[head] = true
+			if _, err := exec.LookPath(head); err != nil {
+				out = append(out, fmt.Sprintf("command %q not found on PATH", head))
+			}
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(strings.ReplaceAll(head, `\`, "/")))); err != nil {
+			out = append(out, fmt.Sprintf("%s: %q not found in the module directory", c.label, head))
+		}
+	}
+	return out
+}
+
 // --- balanced launch ------------------------------------------------------
 
 func cmdRun(args []string) {
@@ -746,6 +1054,8 @@ func cmdDoctor(args []string) {
 		}
 	}
 
+	doctorModules()
+
 	if n := update.Notice(version, 3*time.Second); n != "" {
 		fmt.Println("\nhouston: " + n)
 	}
@@ -793,6 +1103,150 @@ func cmdDoctor(args []string) {
 		fmt.Println("  (nothing to change)")
 	}
 	fmt.Println("Done.")
+}
+
+// doctorModules runs the static (zero-exec) module checks: registry vs disk
+// state, manifest health, command resolution, key collisions, theme values,
+// orphaned install staging dirs, and the resolved theme with per-field layer
+// attribution. Broken manifests (unsupported api, absolute/escaping commands,
+// ctrl-alias keys) surface through LoadAll's per-module errors.
+func doctorModules() {
+	cfg := config.Load()
+	mods, errs := module.LoadAll(cfg)
+	fmt.Printf("\nModules: %s\n", module.Dir())
+	if len(mods) == 0 && len(errs) == 0 {
+		fmt.Println("  none installed")
+	}
+	for _, m := range mods {
+		state := "disabled"
+		if m.Enabled {
+			state = "enabled"
+		}
+		fmt.Printf("  ✓ %s (%s) %s\n", m.Name, state, surfacesSummary(m.Manifest))
+		for _, w := range commandWarnings(m.Manifest, m.Dir) {
+			fmt.Println("      ! " + w)
+		}
+		if m.Manifest.Theme != nil {
+			for _, w := range checkThemeOverrides(*m.Manifest.Theme) {
+				fmt.Println("      ! theme: " + w)
+			}
+		}
+	}
+	for _, w := range shadowedKeys(mods) {
+		fmt.Println("  ! " + w)
+	}
+	for _, e := range errs {
+		fmt.Println("  ✗ " + e.Error())
+	}
+	for _, s := range stagingLeftovers() {
+		fmt.Printf("  ! orphaned install staging dir: %s (safe to delete)\n", s)
+	}
+	for _, w := range checkThemeOverrides(cfg.Theme) {
+		fmt.Println("  ! config.json theme: " + w)
+	}
+	printResolvedTheme(mods, cfg)
+}
+
+// stagingLeftovers lists .staging-* dirs abandoned by a crashed install (the
+// TUI sweeps them at start once the module runtime lands; until then doctor
+// points at them).
+func stagingLeftovers() []string {
+	var out []string
+	dirents, _ := os.ReadDir(module.Dir())
+	for _, d := range dirents {
+		if d.IsDir() && strings.HasPrefix(d.Name(), ".staging-") {
+			out = append(out, filepath.Join(module.Dir(), d.Name()))
+		}
+	}
+	return out
+}
+
+// knownThemeColors mirrors the theme.Colors JSON keys (theme merges match
+// them case-insensitively): doctor keeps its own list so an unknown key gets
+// a note here instead of only the silent field-wise skip Merge applies.
+var knownThemeColors = map[string]bool{
+	"accent": true, "grey": true, "dim": true, "green": true, "yellow": true,
+	"selbg": true, "slgreen": true, "slamber": true, "slred": true,
+	"sldim": true, "slactive": true,
+}
+
+// checkThemeOverrides reports the override fields a Merge would silently
+// skip: unknown color keys, non-ANSI-256 color values, out-of-range layout.
+func checkThemeOverrides(o theme.Overrides) []string {
+	var out []string
+	keys := make([]string, 0, len(o.Colors))
+	for k := range o.Colors {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := o.Colors[k]
+		if !knownThemeColors[strings.ToLower(k)] {
+			out = append(out, fmt.Sprintf("unknown color key %q (ignored)", k))
+			continue
+		}
+		if n, err := strconv.Atoi(v); err != nil || n < 0 || n > 255 || v != strconv.Itoa(n) {
+			out = append(out, fmt.Sprintf("color %q = %q is not an ANSI-256 code 0-255 (ignored)", k, v))
+		}
+	}
+	if l := o.Layout; l != nil {
+		if l.LeftWidth < 0 {
+			out = append(out, fmt.Sprintf("layout.leftWidth %d ignored (must be > 0)", l.LeftWidth))
+		}
+		if l.RightPercent < 0 || l.RightPercent > 100 {
+			out = append(out, fmt.Sprintf("layout.rightPercent %d ignored (must be 1-100)", l.RightPercent))
+		}
+		if l.RightMin < 0 {
+			out = append(out, fmt.Sprintf("layout.rightMin %d ignored (must be > 0)", l.RightMin))
+		}
+	}
+	return out
+}
+
+// printResolvedTheme shows the final theme and which layer set each field:
+// defaults < enabled module themes in lexicographic name order < config.json
+// — the same chain the TUI and statusline resolve at startup.
+func printResolvedTheme(mods []module.Module, cfg config.Config) {
+	t := theme.Default()
+	layer := map[string]string{}
+	for _, f := range themeFields(t) {
+		layer[f.name] = "default"
+	}
+	apply := func(o theme.Overrides, who string) {
+		before := themeFields(t)
+		t = t.Merge(o)
+		for i, f := range themeFields(t) {
+			if f.value != before[i].value {
+				layer[f.name] = who
+			}
+		}
+	}
+	for _, m := range mods {
+		if m.Enabled && m.Manifest.Theme != nil {
+			apply(*m.Manifest.Theme, "module "+m.Name)
+		}
+	}
+	apply(cfg.Theme, "config.json")
+	fmt.Println("  resolved theme:")
+	for _, f := range themeFields(t) {
+		fmt.Printf("    %-14s %-5s (%s)\n", f.name, f.value, layer[f.name])
+	}
+}
+
+// themeField is one theme field flattened for display and layer diffing.
+type themeField struct{ name, value string }
+
+func themeFields(t theme.Theme) []themeField {
+	c, l := t.Colors, t.Layout
+	return []themeField{
+		{"accent", c.Accent}, {"grey", c.Grey}, {"dim", c.Dim}, {"green", c.Green},
+		{"yellow", c.Yellow}, {"selBg", c.SelBg}, {"slGreen", c.SLGreen},
+		{"slAmber", c.SLAmber}, {"slRed", c.SLRed}, {"slDim", c.SLDim},
+		{"slActive", c.SLActive},
+		{"leftWidth", strconv.Itoa(l.LeftWidth)},
+		{"rightPercent", strconv.Itoa(l.RightPercent)},
+		{"rightMin", strconv.Itoa(l.RightMin)},
+	}
 }
 
 // --- TUI / debug ----------------------------------------------------------
