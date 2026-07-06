@@ -25,7 +25,9 @@ import (
 	"time"
 
 	"houston/internal/accounts"
+	"houston/internal/config"
 	"houston/internal/flock"
+	"houston/internal/theme"
 	"houston/internal/usage"
 )
 
@@ -69,6 +71,12 @@ type row struct {
 // every account's quota (cached probe + live override for the active one) and
 // returns the formatted status line.
 func Line(r io.Reader, configDir string) string {
+	// User overrides only for now; enabled-module theme contributions join the
+	// chain (via theme.Resolve) once the module loader exists. Applied before
+	// any rendering — the statusline is a fresh single-threaded process, so
+	// mutating the color vars here can never race.
+	applyTheme(theme.Default().Merge(config.Load().Theme))
+
 	var in input
 	if b, err := io.ReadAll(r); err == nil {
 		_ = json.Unmarshal(b, &in)
@@ -104,16 +112,38 @@ func Line(r io.Reader, configDir string) string {
 
 const barWidth = 8 // cells per usage bar
 
-// ANSI 256-color codes. Emitted only when useColor() is true.
+// ANSI attribute codes that themes never touch.
 const (
-	cReset  = "\x1b[0m"
-	cBold   = "\x1b[1m"
-	cGreen  = "\x1b[38;5;42m"  // plenty of headroom
-	cAmber  = "\x1b[38;5;214m" // filling up
-	cRed    = "\x1b[38;5;203m" // nearly out
-	cDim    = "\x1b[38;5;240m" // brackets, separators, empty cells, meta
-	cActive = "\x1b[38;5;45m"  // the active account's id + ► marker
+	cReset = "\x1b[0m"
+	cBold  = "\x1b[1m"
 )
+
+// ANSI 256-color escapes, emitted only when useColor() is true. Vars rebuilt
+// exactly once per process by applyTheme (Line calls it before rendering);
+// init seeds them from theme.Default() so anything that skips Line — tests,
+// Render callers — gets the exact pre-theme escapes.
+var (
+	cGreen  string // plenty of headroom
+	cAmber  string // filling up
+	cRed    string // nearly out
+	cDim    string // brackets, separators, empty cells, meta
+	cActive string // the active account's id + ► marker
+)
+
+func init() { applyTheme(theme.Default()) }
+
+// applyTheme rebuilds the color escapes from the theme's statusline palette.
+// NO_COLOR still trumps everything: useColor() gates emission, so a themed
+// palette never leaks into a colorless line.
+func applyTheme(t theme.Theme) {
+	cGreen = ansi256(t.Colors.SLGreen)
+	cAmber = ansi256(t.Colors.SLAmber)
+	cRed = ansi256(t.Colors.SLRed)
+	cDim = ansi256(t.Colors.SLDim)
+	cActive = ansi256(t.Colors.SLActive)
+}
+
+func ansi256(code string) string { return "\x1b[38;5;" + code + "m" }
 
 // useColor reports whether to emit ANSI codes. Disabled when NO_COLOR is set
 // (see https://no-color.org) so the line degrades cleanly to plain text.

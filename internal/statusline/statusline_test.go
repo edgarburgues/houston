@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"houston/internal/theme"
 	"houston/internal/usage"
 )
 
@@ -129,6 +130,57 @@ func TestRenderColorEmitsANSI(t *testing.T) {
 	// id and percent stay contiguous (not split by codes) so they remain greppable
 	if !strings.Contains(got, "►work2") || !strings.Contains(got, "41%") {
 		t.Errorf("id/percent should remain intact: %q", got)
+	}
+}
+
+func TestApplyThemeDefaultEscapes(t *testing.T) {
+	// Golden: init seeds the vars with the exact escapes the pre-theme
+	// constants carried, so untouched setups render byte-identical lines.
+	applyTheme(theme.Default())
+	cases := map[string]string{
+		cGreen:  "\x1b[38;5;42m",
+		cAmber:  "\x1b[38;5;214m",
+		cRed:    "\x1b[38;5;203m",
+		cDim:    "\x1b[38;5;240m",
+		cActive: "\x1b[38;5;45m",
+	}
+	for got, want := range cases {
+		if got != want {
+			t.Errorf("default escape = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestApplyThemeRecolorsRender(t *testing.T) {
+	t.Setenv("NO_COLOR", "") // force color on
+	defer applyTheme(theme.Default())
+
+	applyTheme(theme.Default().Merge(theme.Overrides{
+		Colors: map[string]string{"slactive": "99", "slgreen": "119"},
+	}))
+	rows := []row{{ID: "work2", U5: 12, OK: true, Active: true}}
+	got := Render(rows, "", nil)
+	if !strings.Contains(got, "\x1b[38;5;99m") {
+		t.Errorf("active marker should use the themed slactive: %q", got)
+	}
+	if !strings.Contains(got, "\x1b[38;5;119m") {
+		t.Errorf("low-usage bar should use the themed slgreen: %q", got)
+	}
+	if strings.Contains(got, "\x1b[38;5;45m") || strings.Contains(got, "\x1b[38;5;42m") {
+		t.Errorf("default escapes should be fully replaced: %q", got)
+	}
+}
+
+func TestNoColorTrumpsTheme(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	defer applyTheme(theme.Default())
+
+	applyTheme(theme.Default().Merge(theme.Overrides{
+		Colors: map[string]string{"slactive": "99"},
+	}))
+	rows := []row{{ID: "work2", U5: 41, OK: true, Active: true}}
+	if got := Render(rows, "Opus 4.8", nil); strings.Contains(got, "\x1b[") {
+		t.Errorf("NO_COLOR must strip themed escapes too: %q", got)
 	}
 }
 
