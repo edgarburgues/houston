@@ -1,3 +1,7 @@
 # Golden files are byte-exact rendered frames (ANSI escapes, LF): any CRLF
 # normalization would break the comparison on checkout.
 *.golden -text
+
+# POSIX shell handlers must check out with LF even under autocrlf: sh chokes
+# on CRLF line endings.
+*.sh text eol=lf

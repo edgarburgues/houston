@@ -1,0 +1,22 @@
+{
+  "api": 1,
+  "name": "module-hello",
+  "version": "1.0.0",
+  "description": "Hello-world module touching every surface: an action, a wip-badge transform, a preview section, a clock segment and a theme accent",
+  "//": "POSIX variant: swap every command below for [\"sh\", \"handler.sh\"] — both scripts ship, and unknown fields like this one are ignored",
+  "actions": [
+    {
+      "id": "hello",
+      "key": "H",
+      "title": "say hello",
+      "screen": "missions",
+      "command": ["pwsh", "-NoProfile", "-File", "handler.ps1"]
+    }
+  ],
+  "transforms": {
+    "missions": { "command": ["pwsh", "-NoProfile", "-File", "handler.ps1"] },
+    "preview": { "command": ["pwsh", "-NoProfile", "-File", "handler.ps1"] }
+  },
+  "statusline": { "command": ["pwsh", "-NoProfile", "-File", "handler.ps1"], "ttlSeconds": 60 },
+  "theme": { "colors": { "accent": "75" } }
+}

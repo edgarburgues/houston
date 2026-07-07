@@ -97,6 +97,9 @@ on the PATH. To search/resume conversations, use `houston`.
 | `houston plugin rm` / `ls` / `marketplace ...` | disables everywhere / drift table / manages shared marketplaces |
 | `houston skill add <git-url\|dir>` | installs a skill into the shared store — every account sees it instantly |
 | `houston skill rm <name>` / `ls` | removes / lists shared skills |
+| `houston module add <path\|git-url>` | installs a Houston module (snapshot, lands **disabled**, commands printed for review) |
+| `houston module enable <name>` | the consent point: the module's handlers start running (see [docs/modules.md](docs/modules.md)) |
+| `houston module ls` / `rm` / `test` / `log` | inventory / uninstall / author test loop / failure log |
 | `houston version` | prints the version and warns if a newer one exists |
 | `houston update` | self-updates the binary from GitHub Releases (verifies SHA-256, asks first) |
 | `houston update --check` | only checks; reports whether a newer version exists |
@@ -137,6 +140,30 @@ account's `.claude.json` and plugin enablement in each account's
   staged installs).
 
 `houston mcp ls` / `plugin ls` print a per-account drift table (✓/—/✗).
+
+## Modules: extend the TUI and the statusline
+
+A module is a reviewable directory under `~/.claude/houston/modules/<name>/`
+— a `module.json` manifest plus handler scripts in any language. Houston
+never loads module code in-process: every contribution is an exec with a
+JSON envelope on stdin and a JSON reply on stdout, under timeouts, output
+caps and ANSI stripping. Modules can add TUI key bindings, badge/hide/re-sort
+the mission list, append preview sections, contribute a cached statusline
+segment and override theme colors.
+
+```powershell
+houston module add ./examples/module-hello   # snapshot install — lands DISABLED
+houston module test module-hello             # runs every handler against fixtures
+houston module enable module-hello           # the consent point: code runs from here on
+```
+
+Installs never execute anything and always land **disabled**; `add` prints
+every command the module declares so you review before enabling. The
+hardening is robustness against *buggy* modules, **not** a sandbox against
+hostile ones — an enabled module runs arbitrary code as your user. The
+manifest reference, wire contract, authoring loop and security model live in
+[docs/modules.md](docs/modules.md); [examples/module-hello](examples/module-hello)
+is a copyable module touching every surface.
 
 ## Logins in a private window
 
@@ -221,6 +248,10 @@ houston/
 │   ├── Uninstall.ps1      reverts the install (conversations untouched)
 │   └── Build.ps1          (maintenance) cross-compiles + builds the zip
 ├── LICENSE                MIT
+├── docs/
+│   └── modules.md         module authoring guide (manifest, wire contract, security model)
+├── examples/
+│   └── module-hello/      example module touching every surface (pwsh + sh handlers)
 ├── internal/
 │   ├── accounts/  usage/  launch/     accounts, quota probing, launching
 │   ├── oauth/  flock/  browse/        token refresh, cross-process locking, private-window logins
@@ -229,6 +260,7 @@ houston/
 │   ├── statusline/                    status line: active account + everyone's quota
 │   ├── update/                        new-version notices + self-update (GitHub Releases)
 │   ├── scan/  model/  pathenc/        mission discovery and indexing (cached)
+│   ├── config/  theme/  module/       user config, palette/layout theming, exec'd modules
 │   ├── resume/  export/               resuming and exporting (balanced)
 │   └── tui/                           interface (missions + accounts)
 └── main.go · go.mod
