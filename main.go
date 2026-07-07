@@ -5,8 +5,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -465,13 +467,14 @@ func printFleetTable(header string, names []string, accs []accounts.Account, cel
 // cmdModule manages Houston modules — reviewable directories of exec'd
 // handlers (internal/module). Installs are snapshots and always land
 // DISABLED: `enable` is the consent point where module code starts running.
-// (`module test` and `module log` arrive with the exec runner.)
 //
 //	houston module ls
 //	houston module add <path|git-url> [--name <n>] [--enable]
 //	houston module rm <name> [--yes]
 //	houston module enable <name>
 //	houston module disable <name>
+//	houston module test <name> [--event <e>] [--live] [--mission <key>]
+//	houston module log [-f] [<name>]
 func cmdModule(args []string) {
 	sub := ""
 	if len(args) > 0 {
@@ -499,8 +502,12 @@ func cmdModule(args []string) {
 		} else {
 			fmt.Printf("module %q disabled\n", name)
 		}
+	case "test":
+		cmdModuleTest(args[1:])
+	case "log":
+		cmdModuleLog(args[1:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: houston module [ls | add <path|git-url> [--name <n>] [--enable] | rm <name> [--yes] | enable <name> | disable <name>]")
+		fmt.Fprintln(os.Stderr, "usage: houston module [ls | add <path|git-url> [--name <n>] [--enable] | rm <name> [--yes] | enable <name> | disable <name> | test <name> [--event <e>] [--live] [--mission <key>] | log [-f] [<name>]]")
 		os.Exit(1)
 	}
 }
@@ -637,6 +644,118 @@ func cmdModuleRm(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("module %q removed\n", name)
+}
+
+// cmdModuleTest runs every contribution a module declares against synthetic
+// (or --live) data through the real runner policy; the exit code is the
+// verdict, so module repos can run it in CI.
+func cmdModuleTest(args []string) {
+	name := ""
+	opts := module.TestOpts{}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--event":
+			i++
+			if i < len(args) {
+				opts.Event = args[i]
+			}
+		case "--live":
+			opts.Live = true
+		case "--mission":
+			i++
+			if i < len(args) {
+				opts.Mission = args[i]
+				opts.Live = true // a real mission key only exists in live data
+			}
+		default:
+			if name == "" {
+				name = args[i]
+			}
+		}
+	}
+	if name == "" {
+		fmt.Fprintln(os.Stderr, "usage: houston module test <name> [--event <e>] [--live] [--mission <key>]")
+		os.Exit(1)
+	}
+	if err := module.SafeName(name); err != nil {
+		fmt.Fprintln(os.Stderr, "houston:", err)
+		os.Exit(1)
+	}
+	os.Exit(module.RunTest(name, opts))
+}
+
+// cmdModuleLog prints — or with -f follows — modules.log, optionally
+// filtered to one module's stanzas.
+func cmdModuleLog(args []string) {
+	name, follow := "", false
+	for _, a := range args {
+		switch a {
+		case "-f", "--follow":
+			follow = true
+		default:
+			if name == "" {
+				name = a
+			}
+		}
+	}
+	if name != "" {
+		if err := module.SafeName(name); err != nil {
+			fmt.Fprintln(os.Stderr, "houston:", err)
+			os.Exit(1)
+		}
+	}
+	filt := module.NewLogFilter(name)
+	path := module.LogPath()
+	off, _ := printLogChunk(path, 0, filt)
+	if !follow {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			fmt.Println("no module log yet (" + path + ")")
+		}
+		return
+	}
+	for {
+		time.Sleep(500 * time.Millisecond)
+		fi, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if fi.Size() < off {
+			// Trimmed or replaced under us: start over from the new file's top.
+			off = 0
+			filt = module.NewLogFilter(name)
+		}
+		if fi.Size() > off {
+			off, _ = printLogChunk(path, off, filt)
+		}
+	}
+}
+
+// printLogChunk streams complete lines from off to EOF through the filter and
+// returns the offset just past the last complete line — a partially written
+// trailing line is left for the next poll.
+func printLogChunk(path string, off int64, filt *module.LogFilter) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return off, err
+	}
+	defer f.Close()
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		return off, err
+	}
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return off, err
+	}
+	end := bytes.LastIndexByte(b, '\n')
+	if end < 0 {
+		return off, nil
+	}
+	for _, line := range strings.Split(string(b[:end]), "\n") {
+		if filt.Keep(strings.TrimSuffix(line, "\r")) {
+			fmt.Println(line)
+		}
+	}
+	return off + int64(end) + 1, nil
 }
 
 // printEnableNotice is the security-model notice shown at the consent point:

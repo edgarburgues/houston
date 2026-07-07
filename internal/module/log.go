@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"houston/internal/accounts"
@@ -52,6 +53,31 @@ func LogEvent(mod, event, reason string, stderr []byte) {
 	if tail := bytes.TrimSpace(stderr); len(tail) > 0 {
 		f.Write(append(tail, '\n'))
 	}
+}
+
+// LogFilter selects one module's stanzas from a modules.log line stream, for
+// `module log <name>`: a "--- … module=<name> …" header switches the filter
+// on or off, and every following stderr line rides with its header. Stateful
+// because stanzas span lines; an empty name passes everything.
+type LogFilter struct {
+	name string
+	keep bool
+}
+
+// NewLogFilter returns a filter for one module's stanzas ("" = all).
+func NewLogFilter(name string) *LogFilter {
+	return &LogFilter{name: name, keep: name == ""}
+}
+
+// Keep reports whether one log line belongs to the filtered module.
+func (f *LogFilter) Keep(line string) bool {
+	if f.name == "" {
+		return true
+	}
+	if strings.HasPrefix(line, "--- ") {
+		f.keep = strings.Contains(line, " module="+f.name+" ")
+	}
+	return f.keep
 }
 
 // TrimLog bounds modules.log to its last logMaxBytes, cut on a line boundary.

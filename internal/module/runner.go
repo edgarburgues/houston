@@ -151,6 +151,14 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 // the contract; a half-run script may emit a half-truth. Failures are logged
 // to modules.log and returned as *ExecError.
 func Invoke(ctx context.Context, m Module, argv []string, env Envelope, outCap int64, timeout time.Duration) ([]byte, error) {
+	out, _, err := invokeTail(ctx, m, argv, env, outCap, timeout)
+	return out, err
+}
+
+// invokeTail is Invoke plus the captured stderr tail: `module test` prints a
+// handler's stderr even when the exec succeeds, where ExecError never exists
+// to carry it.
+func invokeTail(ctx context.Context, m Module, argv []string, env Envelope, outCap int64, timeout time.Duration) ([]byte, []byte, error) {
 	lk, _ := invokeLocks.LoadOrStore(m.Name, &sync.Mutex{})
 	mu := lk.(*sync.Mutex)
 	mu.Lock()
@@ -158,11 +166,11 @@ func Invoke(ctx context.Context, m Module, argv []string, env Envelope, outCap i
 
 	bin, args, err := resolveArgv(m, argv)
 	if err != nil {
-		return nil, fail(m, env.Event, nil, err, false, -1, 0)
+		return nil, nil, fail(m, env.Event, nil, err, false, -1, 0)
 	}
 	body, err := marshalEnvelope(env)
 	if err != nil {
-		return nil, fail(m, env.Event, nil, err, false, -1, 0)
+		return nil, nil, fail(m, env.Event, nil, err, false, -1, 0)
 	}
 
 	cctx, cancel := context.WithTimeout(ctx, timeout)
@@ -194,18 +202,18 @@ func Invoke(ctx context.Context, m Module, argv []string, env Envelope, outCap i
 
 	switch {
 	case timedOut:
-		return nil, fail(m, env.Event, tail.buf, fmt.Errorf("timed out after %s", timeout), true, -1, dur)
+		return nil, tail.buf, fail(m, env.Event, tail.buf, fmt.Errorf("timed out after %s", timeout), true, -1, dur)
 	case out.over:
-		return nil, fail(m, env.Event, tail.buf, fmt.Errorf("stdout exceeded %d bytes", outCap), false, -1, dur)
+		return nil, tail.buf, fail(m, env.Event, tail.buf, fmt.Errorf("stdout exceeded %d bytes", outCap), false, -1, dur)
 	case runErr != nil:
 		code := -1
 		var ee *exec.ExitError
 		if errors.As(runErr, &ee) {
 			code = ee.ExitCode()
 		}
-		return nil, fail(m, env.Event, tail.buf, runErr, false, code, dur)
+		return nil, tail.buf, fail(m, env.Event, tail.buf, runErr, false, code, dur)
 	}
-	return out.buf.Bytes(), nil
+	return out.buf.Bytes(), tail.buf, nil
 }
 
 // marshalEnvelope is split out so tests can build oversized payloads without

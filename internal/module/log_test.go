@@ -51,6 +51,36 @@ func TestLogEventConcurrentAppenders(t *testing.T) {
 	}
 }
 
+func TestLogFilter(t *testing.T) {
+	lines := []string{
+		"--- 2026-07-06T10:00:00Z module=jira-git event=preview.append exit=1 dur=0.1s timeout=false: boom",
+		"Traceback (most recent call last):",
+		"  ValueError: nope",
+		"--- 2026-07-06T10:00:01Z module=jira event=action.invoke exit=2 dur=0s timeout=false: bad input",
+		"jira stderr line",
+	}
+	tests := []struct {
+		name string
+		want []bool
+	}{
+		// Empty name passes everything, including any preamble.
+		{name: "", want: []bool{true, true, true, true, true}},
+		// A stanza's stderr lines ride with their header; "jira" must not
+		// match the "jira-git" header (prefix, not whole name).
+		{name: "jira-git", want: []bool{true, true, true, false, false}},
+		{name: "jira", want: []bool{false, false, false, true, true}},
+		{name: "other", want: []bool{false, false, false, false, false}},
+	}
+	for _, tc := range tests {
+		f := NewLogFilter(tc.name)
+		for i, line := range lines {
+			if got := f.Keep(line); got != tc.want[i] {
+				t.Errorf("filter %q line %d: keep = %v, want %v", tc.name, i, got, tc.want[i])
+			}
+		}
+	}
+}
+
 func TestTrimLogSkipsUnderContention(t *testing.T) {
 	t.Setenv("HOUSTON_HOME", t.TempDir())
 	LogEvent("m", EventAction, "seed", nil)
