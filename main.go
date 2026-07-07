@@ -897,6 +897,13 @@ func cmdRun(args []string) {
 		fmt.Fprintln(os.Stderr, "houston: no accounts; add one with 'houston account add'")
 		os.Exit(1)
 	}
+	// Self-heal the shared data links before handing the terminal to claude:
+	// the plans/todos junctions drift recurrently, and a drifted dir traps
+	// every plan/todo the launched session writes. Safe relinks are silent;
+	// merges and anything left for doctor are worth a line.
+	for _, n := range provision.Heal(accs).Notices() {
+		fmt.Fprintln(os.Stderr, "houston: "+n)
+	}
 	forcedID, rest, dangling := extractAccountFlag(args)
 	if dangling {
 		fmt.Fprintln(os.Stderr, "houston: -a/--account requires an account id")

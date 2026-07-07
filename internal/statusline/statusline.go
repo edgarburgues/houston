@@ -28,6 +28,7 @@ import (
 	"houston/internal/config"
 	"houston/internal/flock"
 	"houston/internal/module"
+	"houston/internal/provision"
 	"houston/internal/theme"
 	"houston/internal/usage"
 )
@@ -93,6 +94,13 @@ func Line(r io.Reader, configDir string) string {
 		_ = json.Unmarshal(b, &in)
 	}
 	accs, _ := accounts.Load()
+	// Piggyback the render cadence to self-heal the shared data links: the
+	// statusline runs every few hundred ms while ANY session is open, so a
+	// link that drifts mid-session is repaired within seconds — before the
+	// running claude writes a plan into a trapped real dir. The healthy path
+	// is a handful of lstats per account; notices are doctor's business, not
+	// the line's.
+	_ = provision.Heal(accs)
 	active := activeID(accs, configDir)
 
 	probes := cachedProbes(accs)

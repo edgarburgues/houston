@@ -21,6 +21,7 @@ import (
 	"houston/internal/launch"
 	"houston/internal/model"
 	"houston/internal/module"
+	"houston/internal/provision"
 	"houston/internal/resume"
 	"houston/internal/store"
 	"houston/internal/theme"
@@ -594,6 +595,9 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if a, ok := m.curAccount(); ok {
+			if s := healLinks(); s != "" {
+				m.status = s
+			}
 			accounts.TouchUse(a.ID, accounts.Now())
 			cmd := launch.Cmd(a.ResolveConfigDir(), nil, "")
 			return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return execDoneMsg{err} })
@@ -645,6 +649,9 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.preview.HalfPageUp()
 	case "enter":
 		if ms, ok := m.selected(); ok {
+			if s := healLinks(); s != "" {
+				m.status = s
+			}
 			cmd, err := resume.Command(ms)
 			if err != nil {
 				m.status = err.Error()
@@ -1147,6 +1154,25 @@ func (m Model) viewAccounts() string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
+// healLinks self-heals the shared data links right before handing the
+// terminal to claude — launch time is when a drifted plans/todos dir starts
+// trapping the new session's writes. Silent relinks stay silent; merges and
+// leftovers become a footer notice.
+func healLinks() string {
+	accs, err := accounts.Load()
+	if err != nil {
+		return ""
+	}
+	n := provision.Heal(accs).Notices()
+	switch len(n) {
+	case 0:
+		return ""
+	case 1:
+		return "links healed: " + n[0]
+	}
+	return fmt.Sprintf("links healed: %s (+%d more, see houston doctor)", n[0], len(n)-1)
+}
+
 // Run boots the program. th is resolved by the caller (defaults merged with
 // config.json); applyTheme must run before tea.NewProgram so the one-time
 // style mutation can never race a render. mods are the enabled modules, in
@@ -1157,6 +1183,12 @@ func Run(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 	// install staging dirs are swept once per TUI start.
 	module.SweepTmp()
 	module.SweepStaging()
+	// Self-heal the shared data links once at start too — plans written by
+	// claude sessions already running elsewhere route correctly again even if
+	// no launch happens from this TUI.
+	if accs, err := accounts.Load(); err == nil {
+		_ = provision.Heal(accs)
+	}
 	p := tea.NewProgram(New(root, rescan, st, missions, mods), tea.WithAltScreen())
 	_, err := p.Run()
 	return err
