@@ -93,25 +93,76 @@ func TestMergeDoesNotMutateReceiver(t *testing.T) {
 }
 
 func TestResolvePrecedence(t *testing.T) {
-	// defaults < modules in lex order (later wins per field) < user.
-	modA := Overrides{Colors: map[string]string{"accent": "75", "green": "34"}}
-	modB := Overrides{Colors: map[string]string{"accent": "99"}}
-	user := Overrides{Colors: map[string]string{"green": "40"}, Layout: layout(0, 45, 0)}
-
-	got := Resolve([]Overrides{modA, modB}, user)
-	if got.Colors.Accent != "99" {
-		t.Errorf("later module should win per field: accent = %q, want 99", got.Colors.Accent)
+	// defaults < modules in lex order (later wins per field) < user, merged
+	// field-wise; invalid values are skipped per-field, never per-layer.
+	tests := []struct {
+		name    string
+		modules []Overrides
+		user    Overrides
+		want    func(d Theme) Theme
+	}{
+		{
+			name: "no overrides yields the defaults",
+			want: func(d Theme) Theme { return d },
+		},
+		{
+			name:    "module override beats the default",
+			modules: []Overrides{{Colors: map[string]string{"accent": "75"}}},
+			want:    func(d Theme) Theme { d.Colors.Accent = "75"; return d },
+		},
+		{
+			name: "later module wins per field, earlier fields survive",
+			modules: []Overrides{
+				{Colors: map[string]string{"accent": "75", "green": "34"}},
+				{Colors: map[string]string{"accent": "99"}},
+			},
+			want: func(d Theme) Theme { d.Colors.Accent = "99"; d.Colors.Green = "34"; return d },
+		},
+		{
+			name: "user trumps every module, untouched fields keep module values",
+			modules: []Overrides{
+				{Colors: map[string]string{"accent": "75", "green": "34"}},
+				{Colors: map[string]string{"accent": "99"}},
+			},
+			user: Overrides{Colors: map[string]string{"green": "40"}},
+			want: func(d Theme) Theme { d.Colors.Accent = "99"; d.Colors.Green = "40"; return d },
+		},
+		{
+			name: "invalid module color skipped per-field, valid sibling applies",
+			modules: []Overrides{
+				{Colors: map[string]string{"accent": "not-a-color", "yellow": "208"}},
+			},
+			want: func(d Theme) Theme { d.Colors.Yellow = "208"; return d },
+		},
+		{
+			name:    "invalid user color leaves the module's value standing",
+			modules: []Overrides{{Colors: map[string]string{"accent": "75"}}},
+			user:    Overrides{Colors: map[string]string{"accent": "256"}},
+			want:    func(d Theme) Theme { d.Colors.Accent = "75"; return d },
+		},
+		{
+			name:    "layout follows the same chain field-wise",
+			modules: []Overrides{{Layout: layout(30, 50, 0)}},
+			user:    Overrides{Layout: layout(0, 45, 0)},
+			want: func(d Theme) Theme {
+				d.Layout.LeftWidth = 30    // module, untouched by user
+				d.Layout.RightPercent = 45 // user trumps module's 50
+				return d
+			},
+		},
+		{
+			name:    "out-of-range user layout value keeps the module's",
+			modules: []Overrides{{Layout: layout(0, 50, 0)}},
+			user:    Overrides{Layout: layout(0, 200, 40)},
+			want:    func(d Theme) Theme { d.Layout.RightPercent = 50; d.Layout.RightMin = 40; return d },
+		},
 	}
-	if got.Colors.Green != "40" {
-		t.Errorf("user must trump modules: green = %q, want 40", got.Colors.Green)
-	}
-	if got.Layout.RightPercent != 45 || got.Layout.LeftWidth != 26 {
-		t.Errorf("layout merge wrong: %+v", got.Layout)
-	}
-	if got.Colors.Grey != "245" {
-		t.Errorf("untouched fields keep defaults: grey = %q", got.Colors.Grey)
-	}
-	if empty := Resolve(nil, Overrides{}); !reflect.DeepEqual(empty, Default()) {
-		t.Errorf("Resolve with no overrides must equal Default, got %+v", empty)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Resolve(tt.modules, tt.user)
+			if want := tt.want(Default()); !reflect.DeepEqual(got, want) {
+				t.Errorf("Resolve = %+v, want %+v", got, want)
+			}
+		})
 	}
 }

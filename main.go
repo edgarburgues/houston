@@ -1292,9 +1292,13 @@ func cmdTUI(args []string) {
 		fmt.Fprintln(os.Stderr, "houston: scan failed:", err)
 		os.Exit(1)
 	}
-	// User overrides only for now; enabled-module theme contributions join the
-	// chain (via theme.Resolve) once the module loader exists.
-	th := theme.Default().Merge(config.Load().Theme)
+	// Theme precedence: defaults < enabled module themes (lexicographic name
+	// order, later wins per field) < config.json — installed code must never
+	// override the user's explicit taste. Load warnings are dropped here:
+	// broken modules are ls/doctor business.
+	cfg := config.Load()
+	mods, _ := module.LoadEnabled(cfg)
+	th := theme.Resolve(module.ThemeOverrides(mods), cfg.Theme)
 	if err := tui.Run(displayRoot, scanFn, st, missions, th); err != nil {
 		fmt.Fprintln(os.Stderr, "houston:", err)
 		os.Exit(1)

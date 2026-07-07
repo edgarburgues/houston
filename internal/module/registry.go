@@ -17,6 +17,7 @@ import (
 	"houston/internal/accounts"
 	"houston/internal/config"
 	"houston/internal/flock"
+	"houston/internal/theme"
 )
 
 // Entry is one row of modules.json. Source is informational only — installs
@@ -175,6 +176,21 @@ func LoadAll(cfg config.Config) ([]Module, []error) {
 
 func sortEntries(entries []Entry) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+}
+
+// ThemeOverrides collects the modules' theme contributions in slice order;
+// modules without one are skipped. LoadEnabled returns modules sorted
+// lexicographically by name, so feeding its result straight to theme.Resolve
+// yields the documented precedence: defaults < module themes (later name wins
+// per field) < config.json.
+func ThemeOverrides(mods []Module) []theme.Overrides {
+	var out []theme.Overrides
+	for _, m := range mods {
+		if m.Manifest.Theme != nil {
+			out = append(out, *m.Manifest.Theme)
+		}
+	}
+	return out
 }
 
 // loadOne reads and validates one registered module from disk. The name is

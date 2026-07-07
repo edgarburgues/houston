@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"houston/internal/config"
+	"houston/internal/theme"
 )
 
 // writeModuleDir lands a module directory with a manifest, bypassing the
@@ -292,6 +293,68 @@ func TestLoadAll(t *testing.T) {
 		if !found {
 			t.Errorf("no error for %s containing %q in %q", name, frag, errs)
 		}
+	}
+}
+
+func TestThemeOverrides(t *testing.T) {
+	withTheme := func(name, accent string) Module {
+		m := Module{Entry: Entry{Name: name}}
+		m.Manifest.Theme = &theme.Overrides{Colors: map[string]string{"accent": accent}}
+		return m
+	}
+	// Slice order is preserved (LoadEnabled sorts, this must not re-sort) and
+	// modules without a theme contribute nothing rather than a zero override.
+	mods := []Module{
+		withTheme("bravo", "75"),
+		{Entry: Entry{Name: "alpha"}}, // no theme
+		withTheme("charlie", "99"),
+	}
+	got := ThemeOverrides(mods)
+	if len(got) != 2 {
+		t.Fatalf("got %d overrides, want 2: %+v", len(got), got)
+	}
+	if got[0].Colors["accent"] != "75" || got[1].Colors["accent"] != "99" {
+		t.Errorf("order not preserved: %+v", got)
+	}
+	if out := ThemeOverrides(nil); out != nil {
+		t.Errorf("ThemeOverrides(nil) = %+v, want nil", out)
+	}
+}
+
+// TestLoadEnabledThemePrecedence pins the wiring end to end: manifests on
+// disk → LoadEnabled (lexicographic) → ThemeOverrides → theme.Resolve, with
+// the later module name winning per field and config.json trumping both.
+func TestLoadEnabledThemePrecedence(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	writeModuleDir(t, "aaa", `{"api":1,"name":"aaa","theme":{"colors":{"accent":"75","green":"34"}}}`)
+	writeModuleDir(t, "bbb", `{"api":1,"name":"bbb","theme":{"colors":{"accent":"99","yellow":"999"}}}`)
+	writeModuleDir(t, "ccc", minManifest("ccc")) // enabled, no theme
+	// Registered out of lex order on purpose.
+	entries := []Entry{
+		{Name: "bbb", Enabled: true},
+		{Name: "ccc", Enabled: true},
+		{Name: "aaa", Enabled: true},
+	}
+	if err := RegSave(entries); err != nil {
+		t.Fatal(err)
+	}
+	mods, warns := LoadEnabled(config.Config{})
+	if len(warns) != 0 {
+		t.Fatalf("unexpected warnings: %q", warns)
+	}
+	user := theme.Overrides{Colors: map[string]string{"green": "40"}}
+	got := theme.Resolve(ThemeOverrides(mods), user)
+	if got.Colors.Accent != "99" {
+		t.Errorf("accent = %q, want 99 (later lex module wins)", got.Colors.Accent)
+	}
+	if got.Colors.Green != "40" {
+		t.Errorf("green = %q, want 40 (config.json trumps modules)", got.Colors.Green)
+	}
+	if def := theme.Default().Colors.Yellow; got.Colors.Yellow != def {
+		t.Errorf("yellow = %q, want default %q (invalid module color skipped per-field)", got.Colors.Yellow, def)
+	}
+	if def := theme.Default().Colors.Grey; got.Colors.Grey != def {
+		t.Errorf("grey = %q, want default %q (untouched field)", got.Colors.Grey, def)
 	}
 }
 

@@ -73,16 +73,19 @@ type row struct {
 // returns the formatted status line.
 func Line(r io.Reader, configDir string) string {
 	cfg := config.Load()
-	// User overrides only for now; enabled-module theme contributions join the
-	// chain (via theme.Resolve) once the module loader exists. Applied before
-	// any rendering — the statusline is a fresh single-threaded process, so
-	// mutating the color vars here can never race.
-	applyTheme(theme.Default().Merge(cfg.Theme))
-
-	// Module segments come from the machine-wide cache (at most one exec per
-	// module per TTL). Load warnings are dropped: broken modules are ls/doctor
+	// Enabled modules feed two things: theme contributions and cached
+	// segments. Load warnings are dropped: broken modules are ls/doctor
 	// business — errors never reach the line.
 	mods, _ := module.LoadEnabled(cfg)
+
+	// Theme precedence: defaults < module themes (lexicographic name order,
+	// later wins per field) < config.json. Applied before any rendering — the
+	// statusline is a fresh single-threaded process, so mutating the color
+	// vars here can never race.
+	applyTheme(theme.Resolve(module.ThemeOverrides(mods), cfg.Theme))
+
+	// Module segments come from the machine-wide cache (at most one exec per
+	// module per TTL).
 	extra := module.Segments(mods, module.SegmentInput{})
 
 	var in input
