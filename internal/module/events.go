@@ -34,6 +34,7 @@ const (
 	EventTransform = "missions.transform"
 	EventPreview   = "preview.append"
 	EventSegment   = "statusline.segment"
+	EventPreLaunch = "launch.before"
 )
 
 // Envelope is the single JSON object a handler receives on stdin (interactive
@@ -149,6 +150,28 @@ type TransformPayload struct {
 // PreviewPayload is the preview.append payload.
 type PreviewPayload struct {
 	Mission MissionRow `json:"mission"`
+}
+
+// PreLaunchPayload is the launch.before payload: where the launch comes from
+// ("run", "resume" or "account"), the directory claude will start in, and the
+// mission/account behind it when there is one.
+type PreLaunchPayload struct {
+	Source  string      `json:"source"`
+	Cwd     string      `json:"cwd"`
+	Mission *MissionRow `json:"mission,omitempty"`
+	Account *AccountRow `json:"account,omitempty"`
+}
+
+// PreLaunchMods filters the modules that declare a pre-launch hook,
+// preserving the given (lexicographic) order.
+func PreLaunchMods(mods []Module) []Module {
+	var out []Module
+	for _, m := range mods {
+		if m.Manifest.PreLaunch != nil {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // maxTransformRows caps the transform payload; the scan arrives most-recent
@@ -369,6 +392,23 @@ func TmpDir() string { return filepath.Join(accounts.StoreDir(), "tmp") }
 // the exit code is the result. The returned cleanup removes the envelope and
 // must run in the ExecProcess callback; SweepTmp is the crash backstop.
 func ExecAction(m Module, a Action, env Envelope) (*exec.Cmd, func(), error) {
+	return execInteractive(m, a.Command, env)
+}
+
+// ExecPreLaunch builds the *exec.Cmd for a module's pre-launch hook — the
+// same plain interactive shape as ExecAction: real terminal, envelope file,
+// no timeout. The hook's exit code is its verdict: 0 lets the launch
+// continue, anything else cancels it.
+func ExecPreLaunch(m Module, env Envelope) (*exec.Cmd, func(), error) {
+	return execInteractive(m, m.Manifest.PreLaunch.Command, env)
+}
+
+// execInteractive is the shared builder for every surface that owns the
+// terminal: nil stdio (tea.ExecProcess or the caller attaches the real one),
+// no SysProcAttr, no timeout, envelope in a 0600 store tmp file named by
+// HOUSTON_EVENT_FILE. The returned cleanup removes the envelope; SweepTmp is
+// the crash backstop.
+func execInteractive(m Module, argv []string, env Envelope) (*exec.Cmd, func(), error) {
 	if err := os.MkdirAll(TmpDir(), 0o700); err != nil {
 		return nil, nil, err
 	}
@@ -392,14 +432,14 @@ func ExecAction(m Module, a Action, env Envelope) (*exec.Cmd, func(), error) {
 		cleanup()
 		return nil, nil, err
 	}
-	bin, args, err := resolveArgv(m, a.Command)
+	bin, args, err := resolveArgv(m, argv)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = m.Dir
-	cmd.Env = append(handlerEnv(m, EventAction), "HOUSTON_EVENT_FILE="+name)
+	cmd.Env = append(handlerEnv(m, env.Event), "HOUSTON_EVENT_FILE="+name)
 	return cmd, cleanup, nil
 }
 

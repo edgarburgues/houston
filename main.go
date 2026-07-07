@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -796,6 +797,9 @@ func surfacesSummary(man module.Manifest) string {
 	if man.Statusline != nil {
 		parts = append(parts, "statusline")
 	}
+	if man.PreLaunch != nil {
+		parts = append(parts, "preLaunch")
+	}
 	if man.Theme != nil {
 		parts = append(parts, "theme")
 	}
@@ -861,6 +865,9 @@ func manifestCommands(man module.Manifest) []modCommand {
 	if s := man.Statusline; s != nil {
 		out = append(out, modCommand{"statusline", s.Command})
 	}
+	if h := man.PreLaunch; h != nil {
+		out = append(out, modCommand{"preLaunch", h.Command})
+	}
 	return out
 }
 
@@ -892,6 +899,45 @@ func commandWarnings(man module.Manifest, dir string) []string {
 		}
 	}
 	return out
+}
+
+// runPreLaunchHooks runs every enabled module's pre-launch hook attached to
+// this terminal, in lexicographic order, before claude is launched. A hook's
+// exit code is its verdict: nonzero cancels the launch (returns false).
+// Fail-open everywhere else: hooks that cannot be built or started are
+// skipped with a warning — a broken module must never brick `houston run`.
+func runPreLaunchHooks(source string, acc accounts.Account) bool {
+	mods, _ := module.LoadEnabled(config.Load())
+	hooks := module.PreLaunchMods(mods)
+	if len(hooks) == 0 {
+		return true
+	}
+	cwd, _ := os.Getwd()
+	row := module.AccountRowOf(acc)
+	payload := module.PreLaunchPayload{Source: source, Cwd: cwd, Account: &row}
+	for _, mod := range hooks {
+		env := module.NewEnvelope(module.EventPreLaunch, mod, payload)
+		cmd, cleanup, err := module.ExecPreLaunch(mod, env)
+		if err != nil {
+			module.LogEvent(mod.Name, module.EventPreLaunch, err.Error(), nil)
+			fmt.Fprintf(os.Stderr, "houston: [%s] preLaunch skipped: %v\n", mod.Name, err)
+			continue
+		}
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		err = cmd.Run()
+		cleanup()
+		if err == nil {
+			continue
+		}
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			fmt.Fprintf(os.Stderr, "houston: [%s] launch cancelled (exit %d)\n", mod.Name, ee.ExitCode())
+			return false
+		}
+		module.LogEvent(mod.Name, module.EventPreLaunch, "interactive: "+err.Error(), nil)
+		fmt.Fprintf(os.Stderr, "houston: [%s] preLaunch failed: %v\n", mod.Name, err)
+	}
+	return true
 }
 
 // --- balanced launch ------------------------------------------------------
@@ -926,6 +972,9 @@ func cmdRun(args []string) {
 		if !a.LoggedIn() {
 			fmt.Fprintln(os.Stderr, "  (account not logged in — type /login inside Claude this first time)")
 		}
+		if !runPreLaunchHooks("run", a) {
+			return
+		}
 		accounts.TouchUse(a.ID, accounts.Now())
 		if err := launch.Cmd(a.ResolveConfigDir(), rest, "").Run(); err != nil {
 			os.Exit(1)
@@ -952,6 +1001,9 @@ func cmdRun(args []string) {
 	}
 	if !best.LoggedIn() {
 		fmt.Fprintln(os.Stderr, "  (account not logged in — type /login inside Claude this first time)")
+	}
+	if !runPreLaunchHooks("run", best) {
+		return
 	}
 	accounts.TouchUse(best.ID, accounts.Now())
 	// No token injection: identity (and the email) comes from the account dir's

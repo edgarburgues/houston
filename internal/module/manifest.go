@@ -97,6 +97,7 @@ type Manifest struct {
 		Preview  *Handler `json:"preview"`
 	} `json:"transforms"`
 	Statusline *Segment         `json:"statusline"`
+	PreLaunch  *Handler         `json:"preLaunch"`
 	Theme      *theme.Overrides `json:"theme"`
 }
 
@@ -258,6 +259,14 @@ func (m Manifest) validate() error {
 	if m.Statusline != nil {
 		if err := validateCommand(m.Statusline.Command); err != nil {
 			return fmt.Errorf("statusline: %v", err)
+		}
+	}
+	if m.PreLaunch != nil {
+		// Always interactive (it exists to prompt the user before claude gets
+		// the terminal), so the Handler's TimeoutMs is ignored — the user owns
+		// the pace, and the exit code is the verdict.
+		if err := validateCommand(m.PreLaunch.Command); err != nil {
+			return fmt.Errorf("preLaunch: %v", err)
 		}
 	}
 	return nil

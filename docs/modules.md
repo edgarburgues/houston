@@ -45,7 +45,7 @@ enable-order state.
 
 ## module.json reference
 
-A manifest using all four surfaces:
+A manifest using every surface:
 
 ```json
 {
@@ -64,6 +64,7 @@ A manifest using all four surfaces:
     "preview":  { "command": ["python", "preview_ticket.py"] }
   },
   "statusline": { "command": ["pwsh", "-NoProfile", "-File", "sprint_segment.ps1"], "ttlSeconds": 300 },
+  "preLaunch": { "command": ["pwsh", "-NoProfile", "-File", "gate.ps1"] },
   "theme": { "colors": { "yellow": "214" } }
 }
 ```
@@ -80,6 +81,7 @@ known fields with wrong types are hard errors.
 | `actions[]` | array | ≤ 16 entries. Each: `id` (unique in the module, name charset), `key` (see [action keys](#action-keys)), `title` 1–40 runes, `screen` ∈ {`missions`, `accounts`}, `command` argv, `interactive` bool, `refreshAfter` bool, `timeoutMs` (ignored when interactive) |
 | `transforms.missions`, `transforms.preview` | object | `command` argv + optional `timeoutMs` |
 | `statusline` | object | one segment per module: `command`, `ttlSeconds` (default 60, clamped to [60, 3600]), `timeoutMs` (clamped to [500, 4000]) |
+| `preLaunch` | object | `command` argv, run interactively before every claude launch; `timeoutMs` is ignored (the user owns the terminal). Exit 0 continues the launch, anything else cancels it. See [`launch.before`](#launchbefore) |
 | `theme` | object | same shape as `config.json`'s `theme`; see [theme](#settings-and-theme) |
 
 ### Name rules
@@ -289,6 +291,34 @@ the segment this cycle (valid). Segments render in `houston statusline`
 only, appended after the account bars; the TUI does not show them. When a
 refresh fails, the last good text is kept for up to 10 minutes, then the
 segment silently disappears — an error string never reaches the line.
+
+### `launch.before`
+
+Modules with a `preLaunch` handler run **interactively, before claude gets
+the terminal** — on `houston run` and on both TUI launch paths (resuming a
+mission, launching an account). Hooks run in lexicographic module-name
+order; the envelope arrives in `$HOUSTON_EVENT_FILE` (there is no stdin), and
+there is no reply protocol: **the exit code is the verdict**. Exit `0`
+continues the chain (and finally the launch); any other exit cancels the
+launch with a footer/terminal notice naming the module. There is no timeout
+— the hook exists to prompt the user.
+
+Payload:
+
+```json
+{ "source": "resume", "cwd": "C:\work\proj",
+  "mission": { "key": "…", "title": "…", "cwd": "C:\work\proj", … },
+  "account": { "id": "work2", … } }
+```
+
+`source` is `run`, `resume` or `account`; `cwd` is the directory claude will
+start in; `mission` is present on resume launches, `account` on `houston
+run` and account-screen launches.
+
+Failure policy is fail-open: a hook that cannot be built or started is
+skipped with a warning — a broken module must never leave you unable to
+launch claude. Keep the no-op path FAST (local checks only, no network):
+your hook runs on every launch.
 
 ## Writing handlers
 

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -106,6 +107,11 @@ func RunTest(name string, opts TestOpts) int {
 		record(runHandlerTest(w, m, "statusline", EventSegment, s.Command, struct{}{},
 			m.Manifest.ResolveTimeout(SurfaceSegment, s.TimeoutMs), CapSegment, nil))
 	}
+	if h := m.Manifest.PreLaunch; h != nil && (event == "" || event == EventPreLaunch) {
+		record(runPreLaunchTest(w, m, PreLaunchPayload{
+			Source: "test", Cwd: m.Dir, Mission: &data.mission, Account: &data.account,
+		}))
+	}
 	if ran == 0 {
 		if event == "" {
 			fmt.Fprintln(w, "error: the manifest declares no handler contributions")
@@ -136,8 +142,10 @@ func canonicalEvent(e string) (string, error) {
 		return EventPreview, nil
 	case EventSegment, "segment", "statusline":
 		return EventSegment, nil
+	case EventPreLaunch, "prelaunch", "preLaunch", "launch":
+		return EventPreLaunch, nil
 	}
-	return "", fmt.Errorf("unknown event %q (want action.invoke, missions.transform, preview.append or statusline.segment)", e)
+	return "", fmt.Errorf("unknown event %q (want action.invoke, missions.transform, preview.append statusline.segment or launch.before)", e)
 }
 
 // loadForTest loads a module straight from its directory. No registry lookup
@@ -325,6 +333,43 @@ func runInteractiveTest(w io.Writer, m Module, a Action, label string, payload a
 	}
 	fmt.Fprintf(w, "wall time: %s (no timeout)\n", wall)
 	return runErr == nil
+}
+
+// runPreLaunchTest runs the pre-launch hook for real, like an interactive
+// action. Any exit code is a valid outcome by contract — 0 means "launch",
+// nonzero means "cancel" — so both verdicts pass; what fails the test is a
+// hook that cannot be built or started at all.
+func runPreLaunchTest(w io.Writer, m Module, payload PreLaunchPayload) bool {
+	fmt.Fprintf(w, "\n=== preLaunch → %s (interactive)\n", EventPreLaunch)
+	env := NewEnvelope(EventPreLaunch, m, payload)
+	printEnvelope(w, env)
+	cmd, cleanup, err := ExecPreLaunch(m, env)
+	if err != nil {
+		fmt.Fprintf(w, "verdict:\n  ✗ %v\n", err)
+		return false
+	}
+	defer cleanup()
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	fmt.Fprintf(w, "exec: %s (cwd %s, envelope in $HOUSTON_EVENT_FILE, no timeout — the handler owns the terminal)\n", strings.Join(m.Manifest.PreLaunch.Command, " "), m.Dir)
+	start := time.Now()
+	runErr := cmd.Run()
+	wall := time.Since(start).Round(time.Millisecond)
+	fmt.Fprintln(w, "verdict:")
+	switch {
+	case runErr == nil:
+		fmt.Fprintln(w, "  ✓ exit 0 → launch would continue")
+	default:
+		var ee *exec.ExitError
+		if errors.As(runErr, &ee) {
+			fmt.Fprintf(w, "  ✓ exit %d → launch would be cancelled (a valid verdict)\n", ee.ExitCode())
+		} else {
+			fmt.Fprintf(w, "  ✗ %v\n", runErr)
+			fmt.Fprintf(w, "wall time: %s (no timeout)\n", wall)
+			return false
+		}
+	}
+	fmt.Fprintf(w, "wall time: %s (no timeout)\n", wall)
+	return true
 }
 
 func printEnvelope(w io.Writer, env Envelope) {

@@ -119,6 +119,10 @@ type Model struct {
 	// pendingDelete arms the two-step account delete: the id whose removal the
 	// next d/x press confirms. Any other key disarms it.
 	pendingDelete string
+
+	// pending is a claude launch parked while its pre-launch hooks run
+	// (modprelaunch.go); nil when no launch is in flight.
+	pending *pendingLaunch
 }
 
 type accProbeMsg struct{ probes []usage.Probe }
@@ -464,6 +468,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case hookDoneMsg:
+		return m.onHookDone(msg)
+
 	case accProbeMsg:
 		m.accProbes = map[string]usage.Probe{}
 		for _, p := range msg.probes {
@@ -610,7 +617,8 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			accounts.TouchUse(a.ID, accounts.Now())
 			cmd := launch.Cmd(a.ResolveConfigDir(), nil, "")
-			return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return execDoneMsg{err} })
+			row := module.AccountRowOf(a)
+			return m.launchWithHooks(module.PreLaunchPayload{Source: "account", Account: &row}, cmd)
 		}
 	}
 	// Module actions route after the switch: built-in keys can never reach
@@ -668,7 +676,8 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.status = "launching claude --resume " + shortID(ms.ID, 8) + " …"
-			return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return execDoneMsg{err} })
+			row := module.ProjectRows([]model.Mission{ms}, m.st)[0]
+			return m.launchWithHooks(module.PreLaunchPayload{Source: "resume", Cwd: ms.Cwd, Mission: &row}, cmd)
 		}
 	case "*":
 		if ms, ok := m.selected(); ok {
