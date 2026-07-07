@@ -184,6 +184,41 @@ func TestNoColorTrumpsTheme(t *testing.T) {
 	}
 }
 
+func TestRenderModuleSegmentsPlain(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ctx := 12.0
+	rows := []row{{ID: "work", U5: 12, OK: true}}
+	got := Render(rows, "Opus 4.8", &ctx, "sprint 12 · 3d left", "", "clock 09:14")
+	// Extras join after the meta segment; an empty text is hidden this cycle.
+	if !strings.HasSuffix(got, "ctx 12% │ sprint 12 · 3d left │ clock 09:14") {
+		t.Errorf("module segments should trail the line: %q", got)
+	}
+	if strings.Contains(got, "│  │") {
+		t.Errorf("empty segment must not leave a hole: %q", got)
+	}
+	if strings.Contains(got, "\x1b[") {
+		t.Errorf("NO_COLOR must strip module segments too: %q", got)
+	}
+}
+
+func TestRenderModuleSegmentsColor(t *testing.T) {
+	t.Setenv("NO_COLOR", "") // force color on
+	defer applyTheme(theme.Default())
+	applyTheme(theme.Default().Merge(theme.Overrides{
+		Colors: map[string]string{"sldim": "99"},
+	}))
+	rows := []row{{ID: "work2", U5: 41, OK: true, Active: true}}
+	got := Render(rows, "Opus 4.8", nil, "sprint 12")
+	// The segment text itself stays plain (sanitized module output); only the
+	// themed separator around it carries color.
+	if !strings.Contains(got, "sprint 12") {
+		t.Errorf("module segment missing: %q", got)
+	}
+	if !strings.Contains(got, "\x1b[38;5;99m │ \x1b[0msprint 12") {
+		t.Errorf("segment should join through the themed separator: %q", got)
+	}
+}
+
 func TestRenderNoAccounts(t *testing.T) {
 	// With no accounts and no model the line is empty (no rocket placeholder);
 	// a model alone still renders.

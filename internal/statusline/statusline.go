@@ -27,6 +27,7 @@ import (
 	"houston/internal/accounts"
 	"houston/internal/config"
 	"houston/internal/flock"
+	"houston/internal/module"
 	"houston/internal/theme"
 	"houston/internal/usage"
 )
@@ -71,11 +72,18 @@ type row struct {
 // every account's quota (cached probe + live override for the active one) and
 // returns the formatted status line.
 func Line(r io.Reader, configDir string) string {
+	cfg := config.Load()
 	// User overrides only for now; enabled-module theme contributions join the
 	// chain (via theme.Resolve) once the module loader exists. Applied before
 	// any rendering — the statusline is a fresh single-threaded process, so
 	// mutating the color vars here can never race.
-	applyTheme(theme.Default().Merge(config.Load().Theme))
+	applyTheme(theme.Default().Merge(cfg.Theme))
+
+	// Module segments come from the machine-wide cache (at most one exec per
+	// module per TTL). Load warnings are dropped: broken modules are ls/doctor
+	// business — errors never reach the line.
+	mods, _ := module.LoadEnabled(cfg)
+	extra := module.Segments(mods, module.SegmentInput{})
 
 	var in input
 	if b, err := io.ReadAll(r); err == nil {
@@ -105,7 +113,7 @@ func Line(r io.Reader, configDir string) string {
 	if in.ContextWindow.UsedPercentage != nil {
 		ctx = in.ContextWindow.UsedPercentage
 	}
-	return Render(rows, in.Model.DisplayName, ctx)
+	return Render(rows, in.Model.DisplayName, ctx, extra...)
 }
 
 // --- rendering -------------------------------------------------------------
@@ -198,10 +206,12 @@ func bar(pct float64, color bool) string {
 }
 
 // Render builds the status line: one colored usage bar per account (the active
-// one marked ►), separated by │, then the model and context usage. The bar shows
-// the 5h window — the limit you hit first — colored green/amber/red by how full
-// it is. Pure (no I/O), honors NO_COLOR, so it's testable without the network.
-func Render(rows []row, model string, ctxPct *float64) string {
+// one marked ►), separated by │, then the model and context usage, then any
+// extra module segments (already sanitized plain text; empty strings are
+// hidden). The bar shows the 5h window — the limit you hit first — colored
+// green/amber/red by how full it is. Pure (no I/O), honors NO_COLOR, so it's
+// testable without the network.
+func Render(rows []row, model string, ctxPct *float64, extra ...string) string {
 	color := useColor()
 	sep := " │ "
 	if color {
@@ -248,6 +258,11 @@ func Render(rows []row, model string, ctxPct *float64) string {
 	segs := parts
 	if meta != "" {
 		segs = append(segs, meta)
+	}
+	for _, e := range extra {
+		if e != "" {
+			segs = append(segs, e)
+		}
 	}
 	return strings.Join(segs, sep)
 }

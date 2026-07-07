@@ -137,6 +137,22 @@ func TestHelperProcess(t *testing.T) {
 	case "preview":
 		io.Copy(io.Discard, os.Stdin)
 		fmt.Print(`{"sections":[{"title":"S1","body":"line1\n\tindented"},{"title":"S2","body":"b"},{"title":"S3","body":"c"},{"title":"S4","body":"never"}]}`)
+	case "seg-mark":
+		// Drops a unique marker file in extra[0] so segcache tests can count
+		// execs, then replies with extra[1] as the segment text.
+		io.Copy(io.Discard, os.Stdin)
+		f, err := os.CreateTemp(extra[0], "exec-*")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		f.Close()
+		fmt.Printf(`{"text":%q}`, extra[1])
+	case "seg-sleep":
+		ms, _ := strconv.Atoi(extra[0])
+		io.Copy(io.Discard, os.Stdin)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		fmt.Printf(`{"text":%q}`, extra[1])
 	}
 }
 
