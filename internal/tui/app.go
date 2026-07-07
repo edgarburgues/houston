@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -97,6 +98,15 @@ type Model struct {
 	helpMissions string                     // help footers with module actions appended, built once
 	helpAccounts string
 
+	// module transforms + preview sections (see modtransforms.go)
+	modPatches     map[string]module.Patch     // merged presentation patches by mission key
+	xformGen       int                         // generation of the newest transform dispatch
+	xformStop      context.CancelFunc          // cancels the in-flight transform run; never nil
+	initXform      tea.Cmd                     // startup transform dispatch, built in New
+	xformFails     map[string]int              // consecutive transform failures per module
+	prevCache      map[string][]module.Section // preview sections by mission key
+	lastPreviewKey string                      // selection-identity tracker for the preview fetch
+
 	// accounts screen
 	screen     screen
 	accs       []accounts.Account
@@ -114,16 +124,30 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 	ti := textinput.New()
 	ti.Prompt = ""
 	m := Model{
-		root:     root,
-		rescan:   rescan,
-		st:       st,
-		missions: missions,
-		input:    ti,
-		focus:    focusMid,
-		status:   "Houston ready · / search · enter resume · ? help",
-		lay:      curLayout,
-		mods:     mods,
-		warned:   map[string]bool{},
+		root:       root,
+		rescan:     rescan,
+		st:         st,
+		missions:   missions,
+		input:      ti,
+		focus:      focusMid,
+		status:     "Houston ready · / search · enter resume · ? help",
+		lay:        curLayout,
+		mods:       mods,
+		warned:     map[string]bool{},
+		modPatches: map[string]module.Patch{},
+		xformFails: map[string]int{},
+		prevCache:  map[string][]module.Section{},
+	}
+	// Transform gen bookkeeping starts HERE, not in Init: Init has a value
+	// receiver and Bubble Tea keeps the model passed to NewProgram, so any
+	// mutation Init made to its copy would be discarded — the initial reply
+	// would be dropped as stale and xformStop would still be nil when the
+	// first rescan fires. xformStop is therefore always non-nil.
+	m.xformGen = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	m.xformStop = cancel
+	if hasTransforms(mods) {
+		m.initXform = transformCmd(ctx, mods, m.xformGen, module.ProjectRows(missions, st))
 	}
 	refs, accepted, warns := buildModActions(mods)
 	m.modActions = refs
@@ -146,7 +170,10 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 	return m
 }
 
-func (m Model) Init() tea.Cmd { return nil }
+// Init returns the startup transform dispatch stashed by New. Value
+// receiver: any mutation here would be lost (Bubble Tea keeps the model it
+// was constructed with), so the gen bookkeeping must never live in Init.
+func (m Model) Init() tea.Cmd { return m.initXform }
 
 // ---- styling ----
 
@@ -304,9 +331,17 @@ func (m *Model) rebuildMid() {
 				byKey[ms.Key()] = ms
 			}
 			for _, k := range p.Missions {
-				if ms, ok := byKey[k]; ok && m.match(ms) {
-					out = append(out, ms)
+				ms, ok := byKey[k]
+				if !ok || !m.match(ms) {
+					continue
 				}
+				// hide applies in program views too: a hidden mission must
+				// not reappear here wearing its patched title and badge.
+				// sortKey does NOT — curated membership order is user intent.
+				if m.modPatches[ms.Key()].Hide {
+					continue
+				}
+				out = append(out, ms)
 			}
 		}
 	default:
@@ -326,14 +361,29 @@ func (m *Model) rebuildMid() {
 					continue
 				}
 			}
+			if m.modPatches[ms.Key()].Hide {
+				continue
+			}
 			if m.match(ms) {
 				out = append(out, ms)
 			}
 		}
+		// Pinned-first is inviolable (explicit user intent beats any module);
+		// within each group, module sortKeys order the rows they cover ahead
+		// of the rest, which keep the recency order.
 		sort.SliceStable(out, func(i, j int) bool {
 			pi, pj := m.st.MetaOf(out[i].Key()).Pinned, m.st.MetaOf(out[j].Key()).Pinned
 			if pi != pj {
 				return pi
+			}
+			si, sj := m.modPatches[out[i].Key()].SortKey, m.modPatches[out[j].Key()].SortKey
+			switch {
+			case si != "" && sj != "" && si != sj:
+				return si < sj
+			case si != "" && sj == "":
+				return true
+			case sj != "" && si == "":
+				return false
 			}
 			return out[i].LastTime.After(out[j].LastTime)
 		})
@@ -372,7 +422,21 @@ func (m *Model) noteSaveErr(err error) bool {
 
 // ---- update ----
 
+// Update delegates to update and then, as the single choke point, arms the
+// module preview fetch — see armPreview for why no key handler could do it.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	nm, ok := next.(Model)
+	if !ok {
+		return next, cmd
+	}
+	if tick := nm.armPreview(); tick != nil {
+		cmd = tea.Batch(cmd, tick)
+	}
+	return nm, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -398,8 +462,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case modActionMsg:
+		var cmd tea.Cmd
 		if msg.refresh {
-			m.rescanNow()
+			cmd = m.rescanNow()
 		}
 		// The action's outcome wins the footer over any reindex note: the
 		// user asked for it explicitly.
@@ -410,6 +475,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "[" + msg.mod + "] " + msg.status
 		default:
 			m.status = "[" + msg.mod + "] " + msg.id + " done"
+		}
+		return m, cmd
+
+	case xformMsg:
+		if msg.gen != m.xformGen {
+			return m, nil // a stale reply must never clobber a newer scan
+		}
+		m.noteModWarnings(msg.warnings)
+		if msg.patches != nil { // nil = the run panicked; keep what we have
+			m.acceptPatches(msg.patches, msg.warnings)
+			m.rebuildMid()
+			m.updatePreview()
+		}
+		return m, nil
+
+	case previewTickMsg:
+		// The debounce fired: exec only if the cursor still rests on the key
+		// it was armed for, and only if the sections aren't cached already.
+		ms, ok := m.selected()
+		if !ok || ms.Key() != msg.key {
+			return m, nil
+		}
+		if _, ok := m.prevCache[msg.key]; ok {
+			return m, nil
+		}
+		return m, previewCmd(m.mods, msg.key, module.ProjectRows([]model.Mission{ms}, m.st)[0])
+
+	case modPreviewMsg:
+		m.noteModWarnings(msg.warnings)
+		if ms, ok := m.selected(); ok && ms.Key() == msg.key {
+			m.prevCache[msg.key] = msg.sections
+			m.updatePreview()
 		}
 		return m, nil
 
@@ -455,6 +552,7 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch key {
 	case "q", "ctrl+c":
+		m.xformStop() // never nil: any in-flight transform dies with the TUI
 		return m, tea.Quit
 	case "esc", "A", "tab":
 		m.screen = screenMissions
@@ -512,6 +610,7 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
+		m.xformStop() // never nil: any in-flight transform dies with the TUI
 		return m, tea.Quit
 	case "?":
 		m.showHelp = !m.showHelp
@@ -601,7 +700,7 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "r":
-		m.rescanNow()
+		return m, m.rescanNow()
 	}
 	// Module actions route after the switch: built-in keys can never reach
 	// here because colliding actions were dropped when the model was built.
@@ -612,18 +711,25 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // rescanNow re-runs the mission scan and rebuilds every pane — the r key's
-// path, reused by refresh-after-action.
-func (m *Model) rescanNow() {
+// path, reused by refresh-after-action. It returns the module transform
+// re-dispatch for the new scan set (nil without transform modules). The
+// preview cache dies with the scan, and lastPreviewKey resets so the
+// end-of-Update check re-fires even when the selected key is unchanged.
+func (m *Model) rescanNow() tea.Cmd {
 	if m.rescan == nil {
-		return
+		return nil
 	}
-	if ms, err := m.rescan(); err == nil {
-		m.missions = ms
-		m.refresh()
-		m.status = fmt.Sprintf("reindexed: %d missions", len(ms))
-	} else {
+	ms, err := m.rescan()
+	if err != nil {
 		m.status = "reindex failed: " + err.Error()
+		return nil
 	}
+	m.missions = ms
+	m.prevCache = map[string][]module.Section{}
+	m.lastPreviewKey = ""
+	m.refresh()
+	m.status = fmt.Sprintf("reindexed: %d missions", len(ms))
+	return m.dispatchTransforms()
 }
 
 func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -776,6 +882,17 @@ func (m *Model) updatePreview() {
 	if ms.LastPrompt != "" {
 		b.WriteString("\n" + labelStyle.Render("▸ Last message") + "\n" + dimStyle.Render(clipMulti(ms.LastPrompt, 600)) + "\n")
 	}
+	// Module preview sections come from the cache, never from an exec here:
+	// updatePreview runs on the event loop and must stay synchronous. The
+	// fetch is armed at the end of Update (armPreview) and lands in prevCache
+	// through modPreviewMsg.
+	for _, sec := range m.prevCache[ms.Key()] {
+		head := "▸ " + sec.Module
+		if sec.Title != "" {
+			head += ": " + sec.Title
+		}
+		b.WriteString("\n" + labelStyle.Render(head) + "\n" + valStyle.Render(clipMulti(sec.Body, 1200)) + "\n")
+	}
 	b.WriteString("\n" + dimStyle.Render(resume.Hint(ms)) + "\n")
 	m.preview.SetContent(b.String())
 }
@@ -865,6 +982,7 @@ func (m Model) viewMid() string {
 	for i := start; i < end; i++ {
 		ms := m.mid[i]
 		meta := m.st.MetaOf(ms.Key())
+		patch := m.modPatches[ms.Key()]
 		pin := " "
 		if meta.Pinned {
 			pin = "★"
@@ -878,13 +996,29 @@ func (m Model) viewMid() string {
 			tag = " #"
 		}
 		id := shortID(ms.ID, 6)
+		// Title substitution and the badge happen on PLAIN text before the
+		// clip — patches are ANSI-stripped and clamped at merge time, so a
+		// module can never inject an escape sequence into the pane.
+		title := ms.Title
+		if patch.HasTitle {
+			title = patch.Title
+		}
+		badge := ""
+		if patch.Badge != "" {
+			badge = " [" + patch.Badge + "]"
+		}
 		// Clip the plain title FIRST and style each segment afterwards: clip()
 		// counts runes, so a pre-styled string would get its ANSI escapes counted
 		// — and a cut mid-sequence bleeds color into the rest of the pane. The
-		// tag mark is budgeted in so the row never overflows the pane and wraps.
-		title := clip(ms.Title, w-len([]rune(pin+" "+date+" "+id+"  "))-len([]rune(tag)))
+		// tag mark and badge are budgeted in so the row never overflows the
+		// pane and wraps; a pane too narrow for the badge drops the badge.
+		room := w - len([]rune(pin+" "+date+" "+id+"  "))
+		if len([]rune(badge))+len([]rune(tag)) > room {
+			badge = ""
+		}
+		title = clip(title, room-len([]rune(tag))-len([]rune(badge)))
 		if i == m.midCur && m.focus == focusMid {
-			lines = append(lines, selStyle.Width(w).Render(pin+" "+date+" "+id+"  "+title+tag))
+			lines = append(lines, selStyle.Width(w).Render(pin+" "+date+" "+id+"  "+title+badge+tag))
 			continue
 		}
 		if meta.Archived {
@@ -896,7 +1030,10 @@ func (m Model) viewMid() string {
 		if tag != "" {
 			tag = tagStyle.Render(tag)
 		}
-		lines = append(lines, pin+" "+dimStyle.Render(date)+" "+id+"  "+title+tag)
+		if badge != "" {
+			badge = tagStyle.Render(badge)
+		}
+		lines = append(lines, pin+" "+dimStyle.Render(date)+" "+id+"  "+title+badge+tag)
 	}
 	if len(m.mid) == 0 {
 		lines = append(lines, dimStyle.Render("(no missions)"))
