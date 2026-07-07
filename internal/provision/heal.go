@@ -19,11 +19,14 @@ package provision
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"houston/internal/accounts"
 	"houston/internal/flock"
@@ -105,6 +108,19 @@ func relink(res *HealResult, name, link, target string) {
 	res.Relinked = append(res.Relinked, name+" relinked")
 }
 
+// healBudget bounds one merge pass's lock hold and, with it, the stall a
+// synchronous caller (launch, a statusline render, the TUI enter key) can
+// suffer. It must stay well under flock's 30 s staleAfter: an overrun merge
+// would get its lock broken mid-walk, invite a concurrent merger, and then
+// delete that merger's lock on release — the same constraint the segment
+// cache solves with its 10 s batch budget. Merges are resumable by design;
+// whatever the budget cuts off is picked up by the next pass, seconds away
+// at the statusline cadence. A var so tests can shrink it.
+var healBudget = 10 * time.Second
+
+// errHealBudget aborts the walk when the pass budget expires.
+var errHealBudget = errors.New("pass budget expired")
+
 // mergeAndLink drains a drifted real dir into the shared target and links it.
 // Serialized across processes by a try-lock: a loser just leaves the dir for
 // the next pass — with the statusline healing every render, "next pass" is
@@ -117,7 +133,20 @@ func mergeAndLink(res *HealResult, accID, name, link, target string) {
 		return
 	}
 	defer lk.Release()
-	moved, err := mergeTree(link, target, accID)
+	// Re-check under the lock: between the caller's classify and this acquire
+	// a concurrent heal may have merged and linked already — walking on would
+	// send the merge through the fresh junction into the shared store itself.
+	if state := classify(link, target); state != LinkRealData {
+		if state != LinkOK {
+			res.Skipped = append(res.Skipped, name+": state changed mid-heal ("+state.String()+"); retried on next pass")
+		}
+		return
+	}
+	moved, err := mergeTree(link, target, accID, time.Now().Add(healBudget))
+	if errors.Is(err, errHealBudget) {
+		res.Skipped = append(res.Skipped, fmt.Sprintf("%s: merge paused after %d file(s) (pass budget); continuing next pass", name, moved))
+		return
+	}
 	if err != nil {
 		res.Skipped = append(res.Skipped, fmt.Sprintf("%s: merge into shared incomplete (%d file(s) moved, remainder kept): %v", name, moved, err))
 		return
@@ -138,16 +167,28 @@ func mergeAndLink(res *HealResult, accID, name, link, target string) {
 	res.Merged = append(res.Merged, fmt.Sprintf("%s: %d file(s) merged into shared, relinked", name, moved))
 }
 
-// mergeTree moves every file under src into dst, preserving relative paths.
-// Collisions never overwrite: identical content is deduplicated, different
-// content lands under a ".from-<account>" conflict name. Returns how many
-// files were moved (dedups included) and the first error, leaving the
-// remainder in place.
-func mergeTree(src, dst, accID string) (int, error) {
+// mergeTree moves every file under src into dst, preserving relative paths,
+// until deadline expires (errHealBudget; the remainder waits for the next
+// pass). Collisions never overwrite: identical content is deduplicated,
+// different content lands under a ".from-<account>" conflict name. Returns
+// how many files were moved (dedups included) and the first error, leaving
+// the remainder in place.
+func mergeTree(src, dst, accID string, deadline time.Time) (int, error) {
 	moved := 0
 	err := filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if time.Now().After(deadline) {
+			return errHealBudget
+		}
+		// The walk root must stay a real directory for the cached entry paths
+		// to mean what they meant when WalkDir listed them: if a concurrent
+		// heal (say, after a broken lock) linked it meanwhile, p would now
+		// resolve THROUGH the junction into the shared store — and the dedup
+		// below would delete the very files already merged there.
+		if fi, err := os.Lstat(src); err != nil || !fi.IsDir() || isLink(src) {
+			return errors.New("source is no longer a real directory (concurrent heal?)")
 		}
 		rel, err := filepath.Rel(src, p)
 		if err != nil {
@@ -171,8 +212,12 @@ func mergeTree(src, dst, accID string) (int, error) {
 			return nil
 		}
 		if fileExists(to) {
+			before, statErr := os.Stat(p)
 			same, err := sameContent(p, to)
-			if err == nil && same {
+			if err == nil && same && statErr == nil && unchangedSince(p, before) {
+				// The re-stat guards the compare-then-remove window: a live
+				// claude session appending between the two would lose
+				// everything written after the content snapshot.
 				if err := os.Remove(p); err != nil {
 					return fmt.Errorf("%s: %v", rel, err)
 				}
@@ -188,6 +233,14 @@ func mergeTree(src, dst, accID string) (int, error) {
 		return nil
 	})
 	return moved, err
+}
+
+// unchangedSince reports whether the file still has the size and mtime it had
+// at fi — the guard against discarding a file a live writer touched between a
+// content snapshot and its removal.
+func unchangedSince(p string, fi os.FileInfo) bool {
+	cur, err := os.Stat(p)
+	return err == nil && cur.Size() == fi.Size() && cur.ModTime().Equal(fi.ModTime())
 }
 
 // uniqueDest returns a collision-free variant of path: "plan.md" becomes
@@ -236,27 +289,57 @@ func sameContent(a, b string) (bool, error) {
 	return bytes.Equal(ba, bb), nil
 }
 
-// moveFile renames, falling back to an exclusive-create copy for cross-volume
-// moves. The source is removed only after the copy is fully flushed.
+// moveFile moves src to dst without overwriting an existing dst or ever
+// leaving a truncated dst behind. Same volume: a hard link claims the
+// destination name exclusively (EEXIST if dst appeared since the caller's
+// check, where a bare rename would silently replace it) and content follows
+// the inode — a live writer's fd keeps landing in the moved file; rename is
+// the fallback for filesystems without hard links. Cross-volume: copy
+// through a same-dir temp file renamed into place only after a complete
+// close (an interrupted copy must not install truncated bytes under the
+// canonical name — the next pass would demote the intact original to a
+// conflict copy), and src is removed only if it provably did not change
+// during the copy — a live writer keeps its file for the next pass.
 func moveFile(src, dst string) error {
+	if err := os.Link(src, dst); err == nil {
+		return os.Remove(src)
+	} else if errors.Is(err, fs.ErrExist) {
+		return err // never overwrite
+	}
 	if err := os.Rename(src, dst); err == nil {
 		return nil
+	}
+	before, err := os.Stat(src)
+	if err != nil {
+		return err
 	}
 	b, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".heal-tmp-*")
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		os.Remove(dst)
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
 		return err
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(dst)
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if !unchangedSince(src, before) {
+		os.Remove(tmp.Name())
+		return errors.New("changed during copy (live writer?); left for the next pass")
+	}
+	if fileExists(dst) || isDir(dst) {
+		os.Remove(tmp.Name())
+		return errors.New("destination appeared during copy")
+	}
+	if err := os.Rename(tmp.Name(), dst); err != nil {
+		os.Remove(tmp.Name())
 		return err
 	}
 	return os.Remove(src)

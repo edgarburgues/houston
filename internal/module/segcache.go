@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -207,6 +208,54 @@ func segTexts(mods []Module, cache map[string]segEntry, now int64) []string {
 			out = append(out, text)
 		}
 	}
+	return out
+}
+
+// pruneSegCache drops one module's entry from the shared segment cache — the
+// rm step that keeps a same-named module added later from being served the
+// removed module's text within the old entry's TTL (entries are keyed by
+// name alone). Best-effort under the cache's own lock, the same
+// read-modify-write discipline as refreshSegments; on contention the entry
+// stays and doctor flags it as orphaned.
+func pruneSegCache(name string) {
+	lk, err := flock.Acquire(segCachePath()+".lock", 250*time.Millisecond)
+	if err != nil {
+		return
+	}
+	defer lk.Release()
+	cache := readSegCache()
+	if _, ok := cache[name]; !ok {
+		return
+	}
+	delete(cache, name)
+	writeSegCache(cache)
+}
+
+// SegCacheOrphans lists segment-cache entries matching no registry entry and
+// no modules/ dir — leftovers of a crashed rm or a hand-edit. Doctor's
+// business; rm prunes its own entry on the happy path.
+func SegCacheOrphans() []string {
+	cache := readSegCache()
+	if len(cache) == 0 {
+		return nil
+	}
+	known := map[string]bool{}
+	if list, err := RegLoad(); err == nil {
+		for _, e := range list {
+			known[e.Name] = true
+		}
+	}
+	dirents, _ := os.ReadDir(Dir())
+	for _, d := range dirents {
+		known[d.Name()] = true
+	}
+	var out []string
+	for name := range cache {
+		if !known[name] {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 

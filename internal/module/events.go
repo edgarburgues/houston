@@ -330,12 +330,15 @@ type ActionReply struct {
 type actionReplyWire struct {
 	Status  string `json:"status"`
 	Refresh bool   `json:"refresh"`
+	Notice  string `json:"notice"`
 }
 
 // RunAction execs a non-interactive action with the full Invoke hardening.
-// An empty reply is valid (generic "done").
-func RunAction(m Module, a Action, env Envelope) (ActionReply, error) {
-	raw, err := Invoke(context.Background(), m, a.Command, env, CapReply, m.Manifest.ResolveTimeout(SurfaceAction, a.TimeoutMs))
+// An empty reply is valid (generic "done"). The optional notice fills the
+// footer when status is empty — status wins, both surface as "[name] …". ctx
+// lets the TUI's quit-time root cancel reach an in-flight handler.
+func RunAction(ctx context.Context, m Module, a Action, env Envelope) (ActionReply, error) {
+	raw, err := Invoke(ctx, m, a.Command, env, CapReply, m.Manifest.ResolveTimeout(SurfaceAction, a.TimeoutMs))
 	if err != nil {
 		return ActionReply{}, err
 	}
@@ -344,7 +347,11 @@ func RunAction(m Module, a Action, env Envelope) (ActionReply, error) {
 		LogEvent(m.Name, EventAction, err.Error(), nil)
 		return ActionReply{}, err
 	}
-	return ActionReply{Status: CleanLine(w.Status, 120), Refresh: w.Refresh || a.RefreshAfter}, nil
+	status := CleanLine(w.Status, 120)
+	if status == "" {
+		status = CleanLine(w.Notice, 120)
+	}
+	return ActionReply{Status: status, Refresh: w.Refresh || a.RefreshAfter}, nil
 }
 
 // TmpDir holds interactive-action envelope files — inside the store, NOT
@@ -413,14 +420,30 @@ func SweepTmp() {
 }
 
 // SweepStaging removes orphaned install staging dirs; best-effort, called at
-// TUI start.
+// TUI start. Same staleness guard as SweepTmp: a concurrent `module add`
+// stages here for seconds and sweeping it would race the installer's rename
+// into a silently incomplete module — an orphan from a crashed install is
+// old by construction.
 func SweepStaging() {
 	ents, _ := os.ReadDir(Dir())
 	for _, e := range ents {
-		if e.IsDir() && strings.HasPrefix(e.Name(), ".staging-") {
-			os.RemoveAll(filepath.Join(Dir(), e.Name()))
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), ".staging-") {
+			continue
+		}
+		p := filepath.Join(Dir(), e.Name())
+		if fi, err := os.Stat(p); err == nil && time.Since(fi.ModTime()) > sweepAge {
+			os.RemoveAll(p)
 		}
 	}
+}
+
+// StartupMaintenance is the TUI-start housekeeping: stale interactive-action
+// envelopes, orphaned install staging dirs, and the modules.log trim. One
+// entry point so a sweep can't silently un-wire from tui.Run.
+func StartupMaintenance() {
+	SweepTmp()
+	SweepStaging()
+	TrimLog()
 }
 
 // CleanLine sanitizes module text destined for a single line of UI: first

@@ -28,6 +28,11 @@ func makeLink(link, target string) error {
 	c := exec.Command("cmd")
 	c.SysProcAttr = &syscall.SysProcAttr{
 		CmdLine: fmt.Sprintf(`cmd /d /c mklink /J "%s" "%s"`, link, target),
+		// Heal runs makeLink from the console-less statusline render process;
+		// without CREATE_NO_WINDOW (0x08000000, not named in syscall) every
+		// relink attempt would flash a conhost window — every ~300 ms while a
+		// relink keeps failing. mklink needs no console: stdio is already NUL.
+		CreationFlags: 0x08000000,
 	}
 	return c.Run()
 }

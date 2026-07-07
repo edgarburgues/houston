@@ -144,13 +144,35 @@ func TestRunActionRefreshORsWithManifest(t *testing.T) {
 	t.Setenv("HOUSTON_HOME", t.TempDir())
 	m := testModule(t, "act")
 	a := Action{ID: "x", Command: helperCmd("empty"), RefreshAfter: true}
-	rep, err := RunAction(m, a, NewEnvelope(EventAction, m, nil))
+	rep, err := RunAction(context.Background(), m, a, NewEnvelope(EventAction, m, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Empty reply is a valid no-op; refresh still honors the manifest.
 	if rep.Status != "" || !rep.Refresh {
 		t.Fatalf("got %+v", rep)
+	}
+}
+
+func TestRunActionNoticeFillsEmptyStatus(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	m := testModule(t, "act")
+	a := Action{ID: "x", Command: helperCmd("action-notice")}
+	rep, err := RunAction(context.Background(), m, a, NewEnvelope(EventAction, m, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Status != "from the notice" {
+		t.Fatalf("notice should fill an empty status, got %+v", rep)
+	}
+	// status wins when both are present
+	a.Command = helperCmd("action-status-and-notice")
+	rep, err = RunAction(context.Background(), m, a, NewEnvelope(EventAction, m, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Status != "the status" {
+		t.Fatalf("status must win over notice, got %+v", rep)
 	}
 }
 
@@ -218,6 +240,48 @@ func TestSweepTmpKeepsFresh(t *testing.T) {
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Fatal("fresh envelope removed — it may belong to a live session")
+	}
+}
+
+func TestSweepStagingKeepsFresh(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	old := filepath.Join(Dir(), ".staging-old")
+	fresh := filepath.Join(Dir(), ".staging-fresh")
+	for _, d := range []string{old, fresh} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale := time.Now().Add(-2 * sweepAge)
+	os.Chtimes(old, stale, stale)
+	SweepStaging()
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("stale staging dir kept")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("fresh staging dir removed — it may belong to a live module add")
+	}
+}
+
+func TestStartupMaintenanceTrimsLog(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(LogPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line := strings.Repeat("x", 1023) + "\n"
+	big := strings.Repeat(line, (logMaxBytes/1024)+64)
+	if err := os.WriteFile(LogPath(), []byte(big), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The wiring-level check: the TUI-start entry point must actually trim,
+	// not only the unit-tested TrimLog.
+	StartupMaintenance()
+	fi, err := os.Stat(LogPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() > logMaxBytes {
+		t.Fatalf("modules.log not trimmed at startup: %d bytes", fi.Size())
 	}
 }
 

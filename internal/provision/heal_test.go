@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"houston/internal/accounts"
 	"houston/internal/flock"
@@ -221,6 +222,66 @@ func TestHealIsIdempotent(t *testing.T) {
 	}
 	if res := Heal([]accounts.Account{a}); !res.Quiet() || len(res.Relinked) != 0 {
 		t.Fatalf("second pass must be a no-op: %+v", res)
+	}
+}
+
+func TestHealMergePausesOnExpiredBudget(t *testing.T) {
+	a := healEnv(t)
+	driftWithData(t, a, map[string]string{"p.md": "x", "q.md": "y"})
+	// An already-expired budget must pause immediately, keep every file in
+	// place, and hand the remainder to the next pass — never hold the lock on.
+	old := healBudget
+	healBudget = -time.Second
+	defer func() { healBudget = old }()
+	res := Heal([]accounts.Account{a})
+	if len(res.Merged) != 0 || len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0], "next pass") {
+		t.Fatalf("%+v", res)
+	}
+	for _, f := range []string{"p.md", "q.md"} {
+		if _, err := os.Stat(filepath.Join(a.ResolveConfigDir(), "plans", f)); err != nil {
+			t.Fatalf("budget pause must leave %s in place: %v", f, err)
+		}
+	}
+	healBudget = old
+	if res := Heal([]accounts.Account{a}); len(res.Merged) != 1 {
+		t.Fatalf("next pass must finish the merge: %+v", res)
+	}
+}
+
+func TestMoveFileNeverOverwrites(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.md")
+	dst := filepath.Join(dir, "dst.md")
+	os.WriteFile(src, []byte("new"), 0o644)
+	os.WriteFile(dst, []byte("precious"), 0o644)
+	if err := moveFile(src, dst); err == nil {
+		t.Fatal("moving onto an existing destination must fail")
+	}
+	if b, _ := os.ReadFile(dst); string(b) != "precious" {
+		t.Fatalf("destination clobbered: %q", b)
+	}
+	if b, _ := os.ReadFile(src); string(b) != "new" {
+		t.Fatalf("source must stay in place: %q", b)
+	}
+}
+
+func TestUnchangedSince(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f")
+	os.WriteFile(p, []byte("aa"), 0o644)
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !unchangedSince(p, fi) {
+		t.Fatal("untouched file must report unchanged")
+	}
+	os.WriteFile(p, []byte("aaaa"), 0o644)
+	if unchangedSince(p, fi) {
+		t.Fatal("a grown file must report changed")
+	}
+	os.Remove(p)
+	if unchangedSince(p, fi) {
+		t.Fatal("a vanished file must report changed")
 	}
 }
 

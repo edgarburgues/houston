@@ -99,7 +99,7 @@ func newModelMods(t *testing.T, mods ...module.Module) Model {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	m := New("root", func() ([]model.Mission, error) { return fakeMissions(), nil }, st, fakeMissions(), mods)
+	m := New("root", func() ([]model.Mission, error) { return fakeMissions(), nil }, st, fakeMissions(), mods, nil)
 	return drive(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 }
 
@@ -168,7 +168,7 @@ func TestModActionMsgStatusAndRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	m := New("root", func() ([]model.Mission, error) { calls++; return fakeMissions(), nil }, st, nil, nil)
+	m := New("root", func() ([]model.Mission, error) { calls++; return fakeMissions(), nil }, st, nil, nil, nil)
 	m = drive(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	m = drive(m, modActionMsg{mod: "demo", id: "hello", status: "opened PROJ-1", refresh: true})

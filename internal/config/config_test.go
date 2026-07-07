@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -108,6 +109,28 @@ func TestLoad(t *testing.T) {
 				}
 			},
 		},
+		{
+			// PowerShell default encodings prepend a BOM; the file must
+			// still parse (json.Unmarshal alone would reject it).
+			name:  "UTF-8 BOM stripped",
+			body:  "\xEF\xBB\xBF" + `{"theme": {"colors": {"accent": "75"}}}`,
+			write: true,
+			check: func(t *testing.T, c Config) {
+				if got := c.Theme.Colors["accent"]; got != "75" {
+					t.Errorf("colors.accent = %q, want %q (BOM not stripped?)", got, "75")
+				}
+			},
+		},
+		{
+			name:  "UTF-16 yields zero value",
+			body:  "\xFF\xFE{\x00}\x00",
+			write: true,
+			check: func(t *testing.T, c Config) {
+				if !reflect.DeepEqual(c, Config{}) {
+					t.Errorf("want zero Config, got %+v", c)
+				}
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -118,6 +141,43 @@ func TestLoad(t *testing.T) {
 				}
 			}
 			tt.check(t, Load())
+		})
+	}
+}
+
+// TestCheck covers what Load hides: doctor's view of why a config file is
+// being ignored.
+func TestCheck(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string // "" with write=false means no file at all
+		write   bool
+		wantErr string // substring; "" = no error
+	}{
+		{name: "missing file is fine"},
+		{name: "valid file is fine", body: `{"theme": {}}`, write: true},
+		{name: "BOM alone is fine", body: "\xEF\xBB\xBF{}", write: true},
+		{name: "malformed JSON reported", body: `{"theme": {`, write: true, wantErr: "unexpected end"},
+		{name: "UTF-16 reported actionably", body: "\xFF\xFE{\x00}\x00", write: true, wantErr: "UTF-16"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOUSTON_HOME", t.TempDir())
+			if tt.write {
+				if err := os.WriteFile(Path(), []byte(tt.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := Check()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Check() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Check() = %v, want substring %q", err, tt.wantErr)
+			}
 		})
 	}
 }

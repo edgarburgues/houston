@@ -98,6 +98,8 @@ type Model struct {
 	warned       map[string]bool            // once-per-module-per-session passive-surface warnings
 	helpMissions string                     // help footers with module actions appended, built once
 	helpAccounts string
+	modCtx       context.Context    // root context every module exec derives from
+	modCancel    context.CancelFunc // quit-time root cancel; never nil
 
 	// module transforms + preview sections (see modtransforms.go)
 	modPatches     map[string]module.Patch     // merged presentation patches by mission key
@@ -121,7 +123,10 @@ type Model struct {
 
 type accProbeMsg struct{ probes []usage.Probe }
 
-func New(root string, rescan func() ([]model.Mission, error), st *store.Store, missions []model.Mission, mods []module.Module) Model {
+// New builds the model. loadWarns are module.LoadEnabled's warnings (broken
+// manifests, missing dirs) — surfaced at startup like dropped actions, so an
+// enabled module can never vanish silently.
+func New(root string, rescan func() ([]model.Mission, error), st *store.Store, missions []model.Mission, mods []module.Module, loadWarns []string) Model {
 	ti := textinput.New()
 	ti.Prompt = ""
 	m := Model{
@@ -139,18 +144,22 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 		xformFails: map[string]int{},
 		prevCache:  map[string][]module.Section{},
 	}
+	// The root module context: every handler exec (transforms, previews,
+	// non-interactive actions) derives from it, so the quit keys' modCancel
+	// reaches whatever is in flight.
+	m.modCtx, m.modCancel = context.WithCancel(context.Background())
 	// Transform gen bookkeeping starts HERE, not in Init: Init has a value
 	// receiver and Bubble Tea keeps the model passed to NewProgram, so any
 	// mutation Init made to its copy would be discarded — the initial reply
 	// would be dropped as stale and xformStop would still be nil when the
 	// first rescan fires. xformStop is therefore always non-nil.
 	m.xformGen = 1
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(m.modCtx)
 	m.xformStop = cancel
 	if hasTransforms(mods) {
 		m.initXform = transformCmd(ctx, mods, m.xformGen, module.ProjectRows(missions, st))
 	}
-	refs, accepted, warns := buildModActions(mods)
+	refs, accepted, actionWarns := buildModActions(mods)
 	m.modActions = refs
 	m.helpMissions, m.helpAccounts = missionsHelp, accountsHelp
 	for _, r := range accepted {
@@ -161,8 +170,9 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 			m.helpMissions += entry
 		}
 	}
-	if len(warns) > 0 {
-		// Dropped actions surface once at startup; ls/doctor show them too.
+	if warns := append(append([]string{}, loadWarns...), actionWarns...); len(warns) > 0 {
+		// Skipped modules and dropped actions surface once at startup;
+		// ls/doctor show them too.
 		m.status = warns[0]
 		if len(warns) > 1 {
 			m.status += fmt.Sprintf(" (+%d more)", len(warns)-1)
@@ -501,7 +511,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if _, ok := m.prevCache[msg.key]; ok {
 			return m, nil
 		}
-		return m, previewCmd(m.mods, msg.key, module.ProjectRows([]model.Mission{ms}, m.st)[0])
+		return m, previewCmd(m.modCtx, m.mods, msg.key, module.ProjectRows([]model.Mission{ms}, m.st)[0])
 
 	case modPreviewMsg:
 		m.noteModWarnings(msg.warnings)
@@ -553,7 +563,7 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch key {
 	case "q", "ctrl+c":
-		m.xformStop() // never nil: any in-flight transform dies with the TUI
+		m.modCancel() // root cancel: every in-flight module exec dies with the TUI
 		return m, tea.Quit
 	case "esc", "A", "tab":
 		m.screen = screenMissions
@@ -614,7 +624,7 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
-		m.xformStop() // never nil: any in-flight transform dies with the TUI
+		m.modCancel() // root cancel: every in-flight module exec dies with the TUI
 		return m, tea.Quit
 	case "?":
 		m.showHelp = !m.showHelp
@@ -1176,20 +1186,19 @@ func healLinks() string {
 // Run boots the program. th is resolved by the caller (defaults merged with
 // config.json); applyTheme must run before tea.NewProgram so the one-time
 // style mutation can never race a render. mods are the enabled modules, in
-// lexicographic name order (module.LoadEnabled).
-func Run(root string, rescan func() ([]model.Mission, error), st *store.Store, missions []model.Mission, th theme.Theme, mods []module.Module) error {
+// lexicographic name order (module.LoadEnabled); loadWarns are its warnings.
+func Run(root string, rescan func() ([]model.Mission, error), st *store.Store, missions []model.Mission, th theme.Theme, mods []module.Module, loadWarns []string) error {
 	applyTheme(th)
-	// Crash backstops: stale interactive-action envelopes and orphaned
-	// install staging dirs are swept once per TUI start.
-	module.SweepTmp()
-	module.SweepStaging()
+	// Crash backstops, once per TUI start: stale interactive-action
+	// envelopes, orphaned install staging dirs, the modules.log trim.
+	module.StartupMaintenance()
 	// Self-heal the shared data links once at start too — plans written by
 	// claude sessions already running elsewhere route correctly again even if
 	// no launch happens from this TUI.
 	if accs, err := accounts.Load(); err == nil {
 		_ = provision.Heal(accs)
 	}
-	p := tea.NewProgram(New(root, rescan, st, missions, mods), tea.WithAltScreen())
+	p := tea.NewProgram(New(root, rescan, st, missions, mods, loadWarns), tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }

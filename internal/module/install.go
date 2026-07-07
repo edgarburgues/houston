@@ -175,6 +175,7 @@ func Remove(name string) error {
 	lk.Release()
 	if _, err := os.Stat(target); err != nil {
 		if registered {
+			pruneSegCache(name)
 			return nil // entry removed; there was no directory (the "missing" state)
 		}
 		return fmt.Errorf("module %q is not installed", name)
@@ -182,6 +183,10 @@ func Remove(name string) error {
 	if err := os.RemoveAll(target); err != nil {
 		return fmt.Errorf("module files could not be fully removed (a handler may still be running); retry after handlers exit: %v", err)
 	}
+	// Registry first, files second, seg-cache entry last (plan ordering): a
+	// same-named module added later must never be served this one's cached
+	// segment text.
+	pruneSegCache(name)
 	return nil
 }
 

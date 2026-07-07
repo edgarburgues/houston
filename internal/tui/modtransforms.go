@@ -86,15 +86,16 @@ func transformCmd(ctx context.Context, mods []module.Module, gen int, rows []mod
 
 // previewCmd fetches the module preview sections for one mission off the
 // event loop. No generation here: stale replies are dropped by comparing the
-// key against the live selection.
-func previewCmd(mods []module.Module, key string, row module.MissionRow) tea.Cmd {
+// key against the live selection. ctx is the model's root module context, so
+// the quit-time cancel reaches an in-flight handler.
+func previewCmd(ctx context.Context, mods []module.Module, key string, row module.MissionRow) tea.Cmd {
 	return func() (msg tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
 				msg = modPreviewMsg{key: key, warnings: []string{fmt.Sprintf("module preview panic: %v", r)}}
 			}
 		}()
-		secs, warns := module.RunPreviews(context.Background(), mods, row)
+		secs, warns := module.RunPreviews(ctx, mods, row)
 		return modPreviewMsg{key: key, sections: secs, warnings: warns}
 	}
 }
@@ -110,7 +111,7 @@ func (m *Model) dispatchTransforms() tea.Cmd {
 	}
 	m.xformGen++
 	m.xformStop() // never nil: set in New
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(m.modCtx)
 	m.xformStop = cancel
 	return transformCmd(ctx, m.mods, m.xformGen, module.ProjectRows(m.missions, m.st))
 }

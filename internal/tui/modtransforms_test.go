@@ -260,7 +260,7 @@ func TestViewMidBadgeClipBudget(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			m := New("root", nil, st, fakeMissions(), nil)
+			m := New("root", nil, st, fakeMissions(), nil, nil)
 			m = drive(m, tea.WindowSizeMsg{Width: tt.width, Height: 30})
 			key := m.mid[0].Key()
 			m.modPatches[key] = module.Patch{

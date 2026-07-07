@@ -7,6 +7,7 @@ package tui
 // footer never advertises a dead binding.
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -123,7 +124,7 @@ func (m Model) runModuleAction(ref moduleActionRef) (tea.Model, tea.Cmd) {
 	env := module.NewEnvelope(module.EventAction, ref.mod, payload)
 	m.status = "[" + ref.mod.Name + "] " + ref.act.ID + "…"
 	if !ref.act.Interactive {
-		return m, runActionCmd(ref.mod, ref.act, env)
+		return m, runActionCmd(m.modCtx, ref.mod, ref.act, env)
 	}
 	cmd, cleanup, err := module.ExecAction(ref.mod, ref.act, env)
 	if err != nil {
@@ -146,15 +147,16 @@ func (m Model) runModuleAction(ref moduleActionRef) (tea.Model, tea.Cmd) {
 
 // runActionCmd runs a non-interactive action off the event loop. Like every
 // module-spawned goroutine it recovers: a bug reachable through a module
-// path must never crash the TUI.
-func runActionCmd(mod module.Module, act module.Action, env module.Envelope) tea.Cmd {
+// path must never crash the TUI. ctx is the model's root module context, so
+// the quit-time cancel reaches an in-flight handler.
+func runActionCmd(ctx context.Context, mod module.Module, act module.Action, env module.Envelope) tea.Cmd {
 	return func() (msg tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
 				msg = modActionMsg{mod: mod.Name, id: act.ID, err: fmt.Errorf("panic: %v", r)}
 			}
 		}()
-		rep, err := module.RunAction(mod, act, env)
+		rep, err := module.RunAction(ctx, mod, act, env)
 		if err != nil {
 			return modActionMsg{mod: mod.Name, id: act.ID, err: err}
 		}

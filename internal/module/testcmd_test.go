@@ -83,8 +83,11 @@ func TestVerdictReply(t *testing.T) {
 			want: []string{`status: "opened PROJ-142"`, "refresh: true"}},
 		{name: "action empty object", event: EventAction, raw: `{}`,
 			want: []string{"status: empty", "refresh: false"}},
-		{name: "action notice is ignored", event: EventAction, raw: `{"notice":"hi"}`,
-			want: []string{"notice: ignored on this surface"}},
+		{name: "action notice fills an empty status", event: EventAction, raw: `{"notice":"hi"}`,
+			want: []string{`notice: "hi"`}},
+		{name: "action notice loses to status", event: EventAction,
+			raw:  `{"status":"s","notice":"hi"}`,
+			want: []string{"notice: unused when status is set"}},
 		{name: "action wrong-typed refresh is a hard failure", event: EventAction,
 			raw: `{"refresh":"yes"}`, wantFail: true},
 

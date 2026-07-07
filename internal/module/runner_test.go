@@ -58,6 +58,12 @@ func TestHelperProcess(t *testing.T) {
 		fmt.Print(`{"status":"done","refresh":true}`)
 	case "empty":
 		io.Copy(io.Discard, os.Stdin)
+	case "action-notice":
+		io.Copy(io.Discard, os.Stdin)
+		fmt.Print(`{"notice":"from the notice"}`)
+	case "action-status-and-notice":
+		io.Copy(io.Discard, os.Stdin)
+		fmt.Print(`{"status":"the status","notice":"ignored"}`)
 	case "bom":
 		io.Copy(io.Discard, os.Stdin)
 		os.Stdout.Write([]byte{0xEF, 0xBB, 0xBF})

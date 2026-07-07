@@ -311,3 +311,71 @@ func TestSegTextsSanitizesCacheText(t *testing.T) {
 		t.Fatal("fresh entry must not exec")
 	}
 }
+
+func TestPruneSegCacheDropsOneEntry(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	now := time.Now().Unix()
+	writeSegFile(t, map[string]segEntry{
+		"gone": {Text: "stale", OK: true, TS: now, GoodTS: now},
+		"kept": {Text: "fine", OK: true, TS: now, GoodTS: now},
+	})
+	pruneSegCache("gone")
+	cache := readSegFile(t)
+	if _, ok := cache["gone"]; ok {
+		t.Fatal("pruned entry still cached")
+	}
+	if e := cache["kept"]; e.Text != "fine" {
+		t.Fatalf("unrelated entry harmed: %+v", e)
+	}
+	// Contention: pruning is best-effort — a held lock skips, never blocks.
+	lk, err := flock.Acquire(segCachePath()+".lock", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lk.Release()
+	pruneSegCache("kept")
+	if _, ok := readSegFile(t)["kept"]; !ok {
+		t.Fatal("prune under a held lock must skip, not wait it out")
+	}
+}
+
+func TestSegCacheOrphans(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	now := time.Now().Unix()
+	writeSegFile(t, map[string]segEntry{
+		"ghost": {Text: "x", OK: true, TS: now},
+		"alive": {Text: "y", OK: true, TS: now},
+	})
+	if err := os.MkdirAll(filepath.Join(Dir(), "alive"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got := SegCacheOrphans()
+	if len(got) != 1 || got[0] != "ghost" {
+		t.Fatalf("orphans: %v", got)
+	}
+}
+
+func TestRemovePrunesSegCache(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	dir := filepath.Join(Dir(), "seggy")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	man := `{"api":1,"name":"seggy","statusline":{"command":["x"]}}`
+	if err := os.WriteFile(filepath.Join(dir, "module.json"), []byte(man), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegSave([]Entry{{Name: "seggy"}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	writeSegFile(t, map[string]segEntry{
+		"seggy": {Text: "old text", OK: true, TS: now, GoodTS: now},
+	})
+	if err := Remove("seggy"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readSegFile(t)["seggy"]; ok {
+		t.Fatal("rm must prune the module's segment-cache entry")
+	}
+}

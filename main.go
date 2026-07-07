@@ -39,6 +39,11 @@ import (
 // release builds. Local/source builds keep "dev" (which suppresses update nags).
 var version = "dev"
 
+// init stamps the module package's copy of the build version: envelopes and
+// HOUSTON_VERSION must report the same value `houston version` prints, so
+// handlers can gate on it.
+func init() { module.HoustonVersion = version }
+
 func main() {
 	args := os.Args[1:]
 	// Best-effort: clear a binary left aside by a previous Windows self-update
@@ -1248,6 +1253,11 @@ func doctorModules() {
 	cfg := config.Load()
 	mods, errs := module.LoadAll(cfg)
 	fmt.Printf("\nModules: %s\n", module.Dir())
+	// Load() hides a malformed config.json by design (zero value, never
+	// fatal); doctor is where the user learns their file is being ignored.
+	if err := config.Check(); err != nil {
+		fmt.Println("  ✗ config.json: " + err.Error() + " (file ignored)")
+	}
 	if len(mods) == 0 && len(errs) == 0 {
 		fmt.Println("  none installed")
 	}
@@ -1274,6 +1284,9 @@ func doctorModules() {
 	}
 	for _, s := range stagingLeftovers() {
 		fmt.Printf("  ! orphaned install staging dir: %s (safe to delete)\n", s)
+	}
+	for _, n := range module.SegCacheOrphans() {
+		fmt.Printf("  ! stale segment-cache entry %q (module no longer installed; safe to delete modules-seg-cache.json)\n", n)
 	}
 	for _, w := range checkThemeOverrides(cfg.Theme) {
 		fmt.Println("  ! config.json theme: " + w)
@@ -1428,12 +1441,12 @@ func cmdTUI(args []string) {
 	}
 	// Theme precedence: defaults < enabled module themes (lexicographic name
 	// order, later wins per field) < config.json — installed code must never
-	// override the user's explicit taste. Load warnings are dropped here:
-	// broken modules are ls/doctor business.
+	// override the user's explicit taste. Load warnings ride along so a
+	// broken enabled module surfaces once at startup, not only in ls/doctor.
 	cfg := config.Load()
-	mods, _ := module.LoadEnabled(cfg)
+	mods, loadWarns := module.LoadEnabled(cfg)
 	th := theme.Resolve(module.ThemeOverrides(mods), cfg.Theme)
-	if err := tui.Run(displayRoot, scanFn, st, missions, th, mods); err != nil {
+	if err := tui.Run(displayRoot, scanFn, st, missions, th, mods, loadWarns); err != nil {
 		fmt.Fprintln(os.Stderr, "houston:", err)
 		os.Exit(1)
 	}

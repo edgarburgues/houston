@@ -261,9 +261,10 @@ text (control characters stripped, tabs → 2 spaces). Sections are fetched
 when the selection settles on a mission (debounced — holding `j`/`k` does
 not spawn a handler per row) and cached per mission until the next rescan.
 
-Transform and preview replies may also carry `"notice": "≤ 120 runes"`,
-shown once in the TUI footer as `[name] …`. Actions have `status` for that;
-segment replies have no footer, so `notice` is ignored on both.
+Transform, preview, and action replies may also carry `"notice": "≤ 120
+runes"`, shown once in the TUI footer as `[name] …`. On the action surface
+`status` wins the footer; `notice` is used only when `status` is empty.
+Segment replies have no footer, so there `notice` decodes and is dropped.
 
 ### `statusline.segment`
 

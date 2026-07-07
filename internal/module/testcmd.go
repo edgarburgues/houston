@@ -588,15 +588,21 @@ func unknownFieldNotes(obj map[string]json.RawMessage, known map[string]bool, pr
 }
 
 // noticeVerdict grades the optional notice field. Transforms and previews
-// surface it in the TUI footer (≤ 120 runes); actions already have status
-// and segments have no footer, so there it decodes and drops.
+// surface it in the TUI footer (≤ 120 runes); actions use it as the footer
+// text when status is empty; segments have no footer, so there it decodes
+// and drops.
 func noticeVerdict(event string, top map[string]json.RawMessage) []verdict {
 	rawNotice, present := top["notice"]
 	if !present {
 		return nil
 	}
-	if event == EventAction || event == EventSegment {
+	if event == EventSegment {
 		return []verdict{{vNote, "notice: ignored on this surface"}}
+	}
+	if event == EventAction {
+		if _, hasStatus := top["status"]; hasStatus {
+			return []verdict{{vNote, "notice: unused when status is set (status wins the footer)"}}
+		}
 	}
 	var s string
 	if err := json.Unmarshal(rawNotice, &s); err != nil {
