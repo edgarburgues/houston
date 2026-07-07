@@ -19,6 +19,7 @@ import (
 	"houston/internal/export"
 	"houston/internal/launch"
 	"houston/internal/model"
+	"houston/internal/module"
 	"houston/internal/resume"
 	"houston/internal/store"
 	"houston/internal/theme"
@@ -89,6 +90,13 @@ type Model struct {
 	ready     bool
 	lay       theme.Layout
 
+	// modules
+	mods         []module.Module            // enabled, loaded once in New, immutable
+	modActions   map[string]moduleActionRef // "missions:J" → the winning module action
+	warned       map[string]bool            // once-per-module-per-session passive-surface warnings
+	helpMissions string                     // help footers with module actions appended, built once
+	helpAccounts string
+
 	// accounts screen
 	screen     screen
 	accs       []accounts.Account
@@ -102,7 +110,7 @@ type Model struct {
 
 type accProbeMsg struct{ probes []usage.Probe }
 
-func New(root string, rescan func() ([]model.Mission, error), st *store.Store, missions []model.Mission) Model {
+func New(root string, rescan func() ([]model.Mission, error), st *store.Store, missions []model.Mission, mods []module.Module) Model {
 	ti := textinput.New()
 	ti.Prompt = ""
 	m := Model{
@@ -114,6 +122,26 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 		focus:    focusMid,
 		status:   "Houston ready · / search · enter resume · ? help",
 		lay:      curLayout,
+		mods:     mods,
+		warned:   map[string]bool{},
+	}
+	refs, accepted, warns := buildModActions(mods)
+	m.modActions = refs
+	m.helpMissions, m.helpAccounts = missionsHelp, accountsHelp
+	for _, r := range accepted {
+		entry := " · " + keyLabel(r.act.Key) + " " + r.act.Title
+		if r.act.Screen == "accounts" {
+			m.helpAccounts += entry
+		} else {
+			m.helpMissions += entry
+		}
+	}
+	if len(warns) > 0 {
+		// Dropped actions surface once at startup; ls/doctor show them too.
+		m.status = warns[0]
+		if len(warns) > 1 {
+			m.status += fmt.Sprintf(" (+%d more)", len(warns)-1)
+		}
 	}
 	return m
 }
@@ -369,6 +397,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.accProbing = false
 		return m, nil
 
+	case modActionMsg:
+		if msg.refresh {
+			m.rescanNow()
+		}
+		// The action's outcome wins the footer over any reindex note: the
+		// user asked for it explicitly.
+		switch {
+		case msg.err != nil:
+			m.status = actionFailStatus(msg.mod, msg.id, msg.err)
+		case msg.status != "":
+			m.status = "[" + msg.mod + "] " + msg.status
+		default:
+			m.status = "[" + msg.mod + "] " + msg.id + " done"
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.act != actNone {
 			return m.updateInput(msg)
@@ -456,6 +500,11 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cmd := launch.Cmd(a.ResolveConfigDir(), nil, "")
 			return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return execDoneMsg{err} })
 		}
+	}
+	// Module actions route after the switch: built-in keys can never reach
+	// here because colliding actions were dropped when the model was built.
+	if ref, ok := m.modActions["accounts:"+key]; ok {
+		return m.runModuleAction(ref)
 	}
 	return m, nil
 }
@@ -552,17 +601,29 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "r":
-		if m.rescan != nil {
-			if ms, err := m.rescan(); err == nil {
-				m.missions = ms
-				m.refresh()
-				m.status = fmt.Sprintf("reindexed: %d missions", len(ms))
-			} else {
-				m.status = "reindex failed: " + err.Error()
-			}
-		}
+		m.rescanNow()
+	}
+	// Module actions route after the switch: built-in keys can never reach
+	// here because colliding actions were dropped when the model was built.
+	if ref, ok := m.modActions["missions:"+msg.String()]; ok {
+		return m.runModuleAction(ref)
 	}
 	return m, nil
+}
+
+// rescanNow re-runs the mission scan and rebuilds every pane — the r key's
+// path, reused by refresh-after-action.
+func (m *Model) rescanNow() {
+	if m.rescan == nil {
+		return
+	}
+	if ms, err := m.rescan(); err == nil {
+		m.missions = ms
+		m.refresh()
+		m.status = fmt.Sprintf("reindexed: %d missions", len(ms))
+	} else {
+		m.status = "reindex failed: " + err.Error()
+	}
 }
 
 func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -768,7 +829,7 @@ func (m Model) View() string {
 	if m.act != actNone {
 		footer = keyStyle.Render(m.prompt) + m.input.View()
 	} else if m.showHelp {
-		footer = footerStyle.Render(clip("↑↓/jk move · tab/←→ pane · / search · enter resume · * pin · a archive · t tag · n note · p→prog · P new · x remove · e export · A accounts · r reindex · q quit", m.width))
+		footer = footerStyle.Render(clip(m.helpMissions, m.width))
 	} else {
 		footer = footerStyle.Render(clip(m.status, m.width))
 	}
@@ -945,16 +1006,21 @@ func (m Model) viewAccounts() string {
 		}
 	}
 	body := paneFocused.Width(w).Height(h).Render(padBox(lines, h))
-	footer := footerStyle.Render(clip("↑↓ move · enter launch session · r probe usage · d/x remove · esc back · q quit", m.width))
+	footer := footerStyle.Render(clip(m.helpAccounts, m.width))
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
 // Run boots the program. th is resolved by the caller (defaults merged with
 // config.json); applyTheme must run before tea.NewProgram so the one-time
-// style mutation can never race a render.
-func Run(root string, rescan func() ([]model.Mission, error), st *store.Store, missions []model.Mission, th theme.Theme) error {
+// style mutation can never race a render. mods are the enabled modules, in
+// lexicographic name order (module.LoadEnabled).
+func Run(root string, rescan func() ([]model.Mission, error), st *store.Store, missions []model.Mission, th theme.Theme, mods []module.Module) error {
 	applyTheme(th)
-	p := tea.NewProgram(New(root, rescan, st, missions), tea.WithAltScreen())
+	// Crash backstops: stale interactive-action envelopes and orphaned
+	// install staging dirs are swept once per TUI start.
+	module.SweepTmp()
+	module.SweepStaging()
+	p := tea.NewProgram(New(root, rescan, st, missions, mods), tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }

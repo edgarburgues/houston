@@ -681,10 +681,10 @@ func surfacesSummary(man module.Manifest) string {
 	return strings.Join(parts, " ")
 }
 
-// shadowedKeys reports action keys claimed by more than one enabled module:
-// at runtime the first claimant in lexicographic name order wins and later
-// ones are dropped. Built-in TUI keys join this check once the TUI exports
-// its key tables.
+// shadowedKeys reports enabled-module action keys that can never fire: keys
+// the built-in TUI tables own (built-ins always win) and keys already
+// claimed by an earlier module in lexicographic name order — the same rules
+// the TUI enforces when it builds its key map at startup.
 func shadowedKeys(mods []module.Module) []string {
 	owner := map[string]string{}
 	var out []string
@@ -693,6 +693,14 @@ func shadowedKeys(mods []module.Module) []string {
 			continue
 		}
 		for _, a := range m.Manifest.Actions {
+			builtin := tui.BuiltinMissionsKeys
+			if a.Screen == "accounts" {
+				builtin = tui.BuiltinAccountsKeys
+			}
+			if builtin[a.Key] {
+				out = append(out, fmt.Sprintf("%s: action %q key %q (%s) is shadowed by a built-in key", m.Name, a.ID, a.Key, a.Screen))
+				continue
+			}
 			k := a.Screen + ":" + a.Key
 			if by, taken := owner[k]; taken {
 				out = append(out, fmt.Sprintf("%s: action %q key %q (%s) is shadowed by module %s", m.Name, a.ID, a.Key, a.Screen, by))
@@ -1299,7 +1307,7 @@ func cmdTUI(args []string) {
 	cfg := config.Load()
 	mods, _ := module.LoadEnabled(cfg)
 	th := theme.Resolve(module.ThemeOverrides(mods), cfg.Theme)
-	if err := tui.Run(displayRoot, scanFn, st, missions, th); err != nil {
+	if err := tui.Run(displayRoot, scanFn, st, missions, th, mods); err != nil {
 		fmt.Fprintln(os.Stderr, "houston:", err)
 		os.Exit(1)
 	}

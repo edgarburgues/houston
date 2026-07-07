@@ -37,7 +37,7 @@ func newModel(t *testing.T) Model {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	m := New("root", func() ([]model.Mission, error) { return fakeMissions(), nil }, st, fakeMissions())
+	m := New("root", func() ([]model.Mission, error) { return fakeMissions(), nil }, st, fakeMissions(), nil)
 	return drive(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 }
 
