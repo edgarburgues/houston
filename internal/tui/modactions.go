@@ -105,6 +105,11 @@ func keyLabel(k string) string {
 // real terminal, with the envelope in a store tmp file the callback cleans
 // up (SweepTmp is the crash backstop).
 func (m Model) runModuleAction(ref moduleActionRef) (tea.Model, tea.Cmd) {
+	if m.launchBusy() {
+		// A buffered keypress must not queue another ExecProcess over a
+		// pre-launch chain in flight.
+		return m, nil
+	}
 	payload := module.ActionPayload{Screen: ref.act.Screen, Action: ref.act.ID}
 	if ref.act.Screen == "accounts" {
 		a, ok := m.curAccount()

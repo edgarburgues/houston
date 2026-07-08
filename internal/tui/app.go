@@ -121,8 +121,10 @@ type Model struct {
 	pendingDelete string
 
 	// pending is a claude launch parked while its pre-launch hooks run
-	// (modprelaunch.go); nil when no launch is in flight.
-	pending *pendingLaunch
+	// (modprelaunch.go); nil when no launch is in flight. launchGen stamps
+	// each chain so a stale hook verdict can never drive a newer one.
+	pending   *pendingLaunch
+	launchGen int
 }
 
 type accProbeMsg struct{ probes []usage.Probe }
@@ -612,13 +614,19 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if a, ok := m.curAccount(); ok {
+			if m.launchBusy() {
+				return m, nil
+			}
 			if s := healLinks(); s != "" {
 				m.status = s
 			}
-			accounts.TouchUse(a.ID, accounts.Now())
 			cmd := launch.Cmd(a.ResolveConfigDir(), nil, "")
 			row := module.AccountRowOf(a)
-			return m.launchWithHooks(module.PreLaunchPayload{Source: "account", Account: &row}, cmd)
+			// Usage is stamped only when claude actually dispatches — a hook
+			// veto must not count as a use (cmdRun orders it the same way).
+			id := a.ID
+			return m.launchWithHooks(module.PreLaunchPayload{Source: "account", Account: &row}, cmd,
+				func() { accounts.TouchUse(id, accounts.Now()) })
 		}
 	}
 	// Module actions route after the switch: built-in keys can never reach
@@ -667,6 +675,9 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.preview.HalfPageUp()
 	case "enter":
 		if ms, ok := m.selected(); ok {
+			if m.launchBusy() {
+				return m, nil
+			}
 			if s := healLinks(); s != "" {
 				m.status = s
 			}
@@ -677,7 +688,7 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.status = "launching claude --resume " + shortID(ms.ID, 8) + " …"
 			row := module.ProjectRows([]model.Mission{ms}, m.st)[0]
-			return m.launchWithHooks(module.PreLaunchPayload{Source: "resume", Cwd: ms.Cwd, Mission: &row}, cmd)
+			return m.launchWithHooks(module.PreLaunchPayload{Source: "resume", Cwd: ms.Cwd, Mission: &row}, cmd, nil)
 		}
 	case "*":
 		if ms, ok := m.selected(); ok {

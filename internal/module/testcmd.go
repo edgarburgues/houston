@@ -108,8 +108,10 @@ func RunTest(name string, opts TestOpts) int {
 			m.Manifest.ResolveTimeout(SurfaceSegment, s.TimeoutMs), CapSegment, nil))
 	}
 	if h := m.Manifest.PreLaunch; h != nil && (event == "" || event == EventPreLaunch) {
+		// Shaped like a resume launch (mission only), with the documented
+		// harness marker so hooks can tell a test run apart.
 		record(runPreLaunchTest(w, m, PreLaunchPayload{
-			Source: "test", Cwd: m.Dir, Mission: &data.mission, Account: &data.account,
+			Source: "test", Cwd: m.Dir, Mission: &data.mission,
 		}))
 	}
 	if ran == 0 {
@@ -145,7 +147,7 @@ func canonicalEvent(e string) (string, error) {
 	case EventPreLaunch, "prelaunch", "preLaunch", "launch":
 		return EventPreLaunch, nil
 	}
-	return "", fmt.Errorf("unknown event %q (want action.invoke, missions.transform, preview.append statusline.segment or launch.before)", e)
+	return "", fmt.Errorf("unknown event %q (want action.invoke, missions.transform, preview.append, statusline.segment or launch.before)", e)
 }
 
 // loadForTest loads a module straight from its directory. No registry lookup

@@ -9,7 +9,7 @@ under enforced timeouts, output caps and process-tree kill.
 
 `<store>` is `~/.claude/houston` (override with `$HOUSTON_HOME`).
 
-A module can contribute to four exec'd surfaces, plus one declarative one:
+A module can contribute to five exec'd surfaces, plus one declarative one:
 
 | Surface | Manifest key | Event | What it does |
 |---|---|---|---|
@@ -17,6 +17,7 @@ A module can contribute to four exec'd surfaces, plus one declarative one:
 | Mission-list transform | `transforms.missions` | `missions.transform` | badge, retitle, hide or re-sort mission rows |
 | Preview sections | `transforms.preview` | `preview.append` | append sections to the selected mission's preview pane |
 | Statusline segment | `statusline` | `statusline.segment` | one cached text segment in `houston statusline` |
+| Pre-launch hook | `preLaunch` | `launch.before` | interactive gate before every claude launch (exit 0 = continue, else cancel) |
 | Theme | `theme` | — | color/layout overrides, no handler involved |
 
 ## Quick start
@@ -303,17 +304,23 @@ continues the chain (and finally the launch); any other exit cancels the
 launch with a footer/terminal notice naming the module. There is no timeout
 — the hook exists to prompt the user.
 
-Payload:
+Payload (a resume launch carries the mission; `houston run` and
+account-screen launches carry the account instead - never both):
 
 ```json
-{ "source": "resume", "cwd": "C:\work\proj",
-  "mission": { "key": "…", "title": "…", "cwd": "C:\work\proj", … },
-  "account": { "id": "work2", … } }
+{ "source": "resume", "cwd": "C:\\work\\proj",
+  "mission": { "key": "…", "title": "…", "cwd": "C:\\work\\proj" } }
+```
+
+```json
+{ "source": "run", "cwd": "C:\\work",
+  "account": { "id": "work2", "label": "…", "configDir": "…" } }
 ```
 
 `source` is `run`, `resume` or `account`; `cwd` is the directory claude will
 start in; `mission` is present on resume launches, `account` on `houston
-run` and account-screen launches.
+run` and account-screen launches. `houston module test` sends `source:
+"test"` (mission only), so a hook can tell a harness run apart.
 
 Failure policy is fail-open: a hook that cannot be built or started is
 skipped with a warning — a broken module must never leave you unable to

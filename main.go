@@ -973,7 +973,7 @@ func cmdRun(args []string) {
 			fmt.Fprintln(os.Stderr, "  (account not logged in — type /login inside Claude this first time)")
 		}
 		if !runPreLaunchHooks("run", a) {
-			return
+			os.Exit(1) // no session ran: scripts must be able to tell
 		}
 		accounts.TouchUse(a.ID, accounts.Now())
 		if err := launch.Cmd(a.ResolveConfigDir(), rest, "").Run(); err != nil {
@@ -1003,7 +1003,7 @@ func cmdRun(args []string) {
 		fmt.Fprintln(os.Stderr, "  (account not logged in — type /login inside Claude this first time)")
 	}
 	if !runPreLaunchHooks("run", best) {
-		return
+		os.Exit(1) // no session ran: scripts must be able to tell
 	}
 	accounts.TouchUse(best.ID, accounts.Now())
 	// No token injection: identity (and the email) comes from the account dir's
