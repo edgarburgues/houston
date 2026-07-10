@@ -240,7 +240,10 @@ the first patch per key wins within one module:
 - `title` (≤ 200 runes) replaces the **display** title; search still matches
   the original — patches are presentation, not identity.
 - `badge` (≤ 16 runes) renders as plain-text ` [PROJ-142]`; Houston owns the
-  brackets and styling.
+  brackets and styling. Unlike the other fields, badges from DIFFERENT
+  modules compose (` [STIC 3.16.0 · DV PROD!]`, capped at 40 runes) instead
+  of overwriting each other; an explicit empty badge from a later module
+  clears the earlier ones.
 - `hide` removes the row from **all** list views, program views included.
 - `sortKey` sorts ascending within the pinned and unpinned groups of the
   default views only — pinned-first is inviolable, and program views keep
