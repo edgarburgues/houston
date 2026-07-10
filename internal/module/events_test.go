@@ -66,8 +66,8 @@ func TestRunTransformsMergeAndSanitize(t *testing.T) {
 	if !p.HasTitle || p.Title != "TA" {
 		t.Errorf("title: %+v", p)
 	}
-	if p.Badge != "B" {
-		t.Errorf("badge later-name-wins: %q", p.Badge)
+	if p.Badge != "A · B" {
+		t.Errorf("badges from different modules must compose: %q", p.Badge)
 	}
 	if !p.Hide {
 		t.Error("hide from b-mod lost")

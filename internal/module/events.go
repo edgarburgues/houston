@@ -185,6 +185,10 @@ const (
 	CapSegment = 8 << 10 // statusline segments
 )
 
+// composedBadgeMax bounds a badge composed from several modules — enough for
+// two full badges plus the separator without starving the title of width.
+const composedBadgeMax = 40
+
 // Patch is one mission's merged presentation override. HasTitle
 // distinguishes "title set to empty" from "title untouched" — the wire uses
 // pointers for the same reason. Patches are presentation, not identity:
@@ -263,7 +267,19 @@ func RunTransforms(ctx context.Context, mods []Module, gen int, rows []MissionRo
 				cur.HasTitle = true
 			}
 			if p.Badge != nil {
-				cur.Badge = CleanLine(*p.Badge, 16)
+				b := CleanLine(*p.Badge, 16)
+				switch {
+				case b == "":
+					cur.Badge = "" // an explicit empty badge clears earlier ones
+				case cur.Badge == "":
+					cur.Badge = b
+				case cur.Badge != b:
+					// Badges COMPOSE across modules, unlike title/hide/sortKey:
+					// when two modules label one mission (a STIC project that
+					// also points at a production Dataverse environment), both
+					// labels deserve to be seen.
+					cur.Badge = CleanLine(cur.Badge+" · "+b, composedBadgeMax)
+				}
 			}
 			if p.SortKey != nil {
 				cur.SortKey = *p.SortKey
