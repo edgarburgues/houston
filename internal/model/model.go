@@ -55,6 +55,9 @@ type Meta struct {
 	Note     string   `json:"note,omitempty"`
 	Pinned   bool     `json:"pinned,omitempty"`
 	Archived bool     `json:"archived,omitempty"`
+	// CwdOverride re-points the mission's working directory when the project
+	// folder moved: the transcript's own cwd is immutable history.
+	CwdOverride string `json:"cwdOverride,omitempty"`
 }
 
 // Program is a logical grouping of missions (the ".prog" manifest).

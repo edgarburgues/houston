@@ -143,6 +143,9 @@ func TestStartupTransformAndRescanRedispatch(t *testing.T) {
 	if p.Badge != "GEN" || !p.HasTitle || p.Title != "transformed" {
 		t.Fatalf("gen-1 patches not applied: %+v", p)
 	}
+	// This test isolates MODULE badges; the fixtures' fake cwds would earn
+	// the core cwd? marker and change the pane text under assertion.
+	m.cwdMissing = map[string]bool{}
 	if v := m.viewMid(); !strings.Contains(v, "[GEN]") || strings.Contains(v, "Pokewalker") {
 		t.Fatalf("badge/title substitution missing from the pane:\n%s", v)
 	}
@@ -268,6 +271,9 @@ func TestViewMidBadgeClipBudget(t *testing.T) {
 				Title: strings.Repeat("t", 300),
 				Badge: "0123456789ABCDEF", // the 16-rune wire maximum
 			}
+			// Isolate the module badge from the core cwd? marker the fake
+			// fixture cwds would otherwise earn.
+			m.cwdMissing = map[string]bool{}
 			m.rebuildMid()
 			pane := m.viewMid()
 			lines := strings.Split(pane, "\n")

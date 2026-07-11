@@ -28,7 +28,7 @@ var BuiltinMissionsKeys = map[string]bool{
 	"up": true, "down": true, "k": true, "j": true,
 	"left": true, "right": true, "h": true, "l": true,
 	"/": true, "esc": true, "pgdown": true, "pgup": true, "f": true, "b": true,
-	"enter": true, "*": true, "a": true, "t": true, "n": true,
+	"enter": true, "*": true, "a": true, "t": true, "n": true, "m": true,
 	"p": true, "P": true, "x": true, "e": true, "r": true,
 }
 
@@ -41,7 +41,7 @@ var BuiltinAccountsKeys = map[string]bool{
 // Help-footer base literals; New appends the enabled modules' surviving
 // actions once, so View renders a plain string.
 const (
-	missionsHelp = "↑↓/jk move · tab/←→ pane · / search · enter resume · * pin · a archive · t tag · n note · p→prog · P new · x remove · e export · A accounts · r reindex · q quit"
+	missionsHelp = "↑↓/jk move · tab/←→ pane · / search · enter resume · * pin · a archive · t tag · n note · m remap cwd · p→prog · P new · x remove · e export · A accounts · r reindex · q quit"
 	accountsHelp = "↑↓ move · enter launch session · r probe usage · d/x remove · esc back · q quit"
 )
 

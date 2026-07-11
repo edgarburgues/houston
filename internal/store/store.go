@@ -140,7 +140,7 @@ func (s *Store) MetaOf(key string) model.Meta { return s.Meta[key] }
 // setMeta persists the change and returns any write error so the UI can report
 // it instead of silently claiming success.
 func (s *Store) setMeta(key string, m model.Meta) error {
-	if len(m.Tags) == 0 && m.Note == "" && !m.Pinned && !m.Archived {
+	if len(m.Tags) == 0 && m.Note == "" && !m.Pinned && !m.Archived && m.CwdOverride == "" {
 		delete(s.Meta, key)
 	} else {
 		s.Meta[key] = m
@@ -163,6 +163,15 @@ func (s *Store) ToggleArchive(key string) error {
 func (s *Store) SetNote(key, note string) error {
 	m := s.Meta[key]
 	m.Note = strings.TrimSpace(note)
+	return s.setMeta(key, m)
+}
+
+// SetCwdOverride re-points a mission's working directory (empty clears).
+// When a project folder moves, this override is what keeps resume, the
+// pre-launch payload and the modules' cwd probes pointing somewhere real.
+func (s *Store) SetCwdOverride(key, cwd string) error {
+	m := s.Meta[key]
+	m.CwdOverride = strings.TrimSpace(cwd)
 	return s.setMeta(key, m)
 }
 

@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -49,6 +50,7 @@ const (
 	actSearch
 	actTag
 	actNote
+	actRemapCwd
 	actAddProgram
 	actNewProgram
 )
@@ -103,6 +105,10 @@ type Model struct {
 
 	// module transforms + preview sections (see modtransforms.go)
 	modPatches     map[string]module.Patch     // merged presentation patches by mission key
+	// cwdMissing flags missions whose (possibly overridden) cwd no longer
+	// exists on disk - a moved project. viewMid composes a core "cwd?" badge
+	// for them and key m offers the remap. Rebuilt by adoptMissions.
+	cwdMissing map[string]bool
 	xformGen       int                         // generation of the newest transform dispatch
 	xformStop      context.CancelFunc          // cancels the in-flight transform run; never nil
 	initXform      tea.Cmd                     // startup transform dispatch, built in New
@@ -154,6 +160,9 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 	// non-interactive actions) derives from it, so the quit keys' modCancel
 	// reaches whatever is in flight.
 	m.modCtx, m.modCancel = context.WithCancel(context.Background())
+	// Fold in cwd overrides and compute the missing-cwd set BEFORE anything
+	// consumes m.missions (the initial transform payload included).
+	m.adoptMissions(missions)
 	// Transform gen bookkeeping starts HERE, not in Init: Init has a value
 	// receiver and Bubble Tea keeps the model passed to NewProgram, so any
 	// mutation Init made to its copy would be discarded — the initial reply
@@ -163,7 +172,7 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 	ctx, cancel := context.WithCancel(m.modCtx)
 	m.xformStop = cancel
 	if hasTransforms(mods) {
-		m.initXform = transformCmd(ctx, mods, m.xformGen, module.ProjectRows(missions, st))
+		m.initXform = transformCmd(ctx, mods, m.xformGen, module.ProjectRows(m.missions, st))
 	}
 	refs, accepted, actionWarns := buildModActions(mods)
 	m.modActions = refs
@@ -711,6 +720,11 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.startInput(actNote, "Note: ")
 			m.input.SetValue(m.st.MetaOf(ms.Key()).Note)
 		}
+	case "m":
+		if ms, ok := m.selected(); ok {
+			m.startInput(actRemapCwd, "Remap cwd to (empty = clear override): ")
+			m.input.SetValue(ms.Cwd)
+		}
 	case "p":
 		if _, ok := m.selected(); ok {
 			m.startInput(actAddProgram, "Add to program: ")
@@ -752,6 +766,32 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // re-dispatch for the new scan set (nil without transform modules). The
 // preview cache dies with the scan, and lastPreviewKey resets so the
 // end-of-Update check re-fires even when the selected key is unchanged.
+// adoptMissions installs a scanned mission set: the store's per-mission cwd
+// overrides are folded in first (transcripts are immutable history; when a
+// project folder moves, the override is what keeps resume, the pre-launch
+// payload and the modules' cwd probes pointing somewhere real), then every
+// mission whose directory no longer exists is flagged for the cwd? marker.
+// Runs only on scan-set changes - a few hundred stats, never per render.
+func (m *Model) adoptMissions(ms []model.Mission) {
+	if m.st != nil {
+		for i := range ms {
+			if ov := m.st.MetaOf(ms[i].Key()).CwdOverride; ov != "" {
+				ms[i].Cwd = ov
+			}
+		}
+	}
+	m.missions = ms
+	m.cwdMissing = map[string]bool{}
+	for _, x := range ms {
+		if x.Cwd == "" {
+			continue
+		}
+		if fi, err := os.Stat(x.Cwd); err != nil || !fi.IsDir() {
+			m.cwdMissing[x.Key()] = true
+		}
+	}
+}
+
 func (m *Model) rescanNow() tea.Cmd {
 	if m.rescan == nil {
 		return nil
@@ -761,7 +801,7 @@ func (m *Model) rescanNow() tea.Cmd {
 		m.status = "reindex failed: " + err.Error()
 		return nil
 	}
-	m.missions = ms
+	m.adoptMissions(ms)
 	m.prevCache = map[string][]module.Section{}
 	m.lastPreviewKey = ""
 	m.refresh()
@@ -803,6 +843,27 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case actNote:
 			if ok {
 				m.noteSaveErr(m.st.SetNote(ms.Key(), val))
+			}
+		case actRemapCwd:
+			if ok {
+				if val != "" {
+					if fi, err := os.Stat(val); err != nil || !fi.IsDir() {
+						m.status = "not a directory: " + val
+						m.refresh()
+						return m, nil
+					}
+				}
+				if !m.noteSaveErr(m.st.SetCwdOverride(ms.Key(), val)) {
+					// Re-scan so the override (or its removal) lands everywhere
+					// a cwd matters: resume, hooks, payloads, the cwd? marker.
+					cmd := m.rescanNow()
+					if val == "" {
+						m.status = "cwd override cleared"
+					} else {
+						m.status = "cwd remapped: " + val
+					}
+					return m, cmd
+				}
 			}
 		case actAddProgram:
 			if ok && val != "" {
@@ -890,6 +951,9 @@ func (m *Model) updatePreview() {
 	row("ID", ms.ID)
 	row("Project", ms.Project)
 	row("cwd", ms.Cwd)
+	if m.cwdMissing[ms.Key()] {
+		row("", "MISSING - press m to remap")
+	}
 	if ms.LastCwd != "" && ms.LastCwd != ms.Cwd {
 		row("Worked in", ms.LastCwd)
 	}
@@ -1020,6 +1084,15 @@ func (m Model) viewMid() string {
 		ms := m.mid[i]
 		meta := m.st.MetaOf(ms.Key())
 		patch := m.modPatches[ms.Key()]
+		if m.cwdMissing[ms.Key()] {
+			// Core marker, composed like a module badge: the directory is
+			// gone (moved project?) - resume would fail; key m remaps it.
+			if patch.Badge != "" {
+				patch.Badge = "cwd? · " + patch.Badge
+			} else {
+				patch.Badge = "cwd?"
+			}
+		}
 		pin := " "
 		if meta.Pinned {
 			pin = "★"
