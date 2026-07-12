@@ -144,13 +144,16 @@ func (s Segment) TTL() time.Duration {
 
 // View is a module-contributed full-screen read-only page, opened from the
 // missions screen by its key. The handler renders on demand (view.render)
-// and on the r refresh key; plain text only, scrolled by Houston.
+// and on the r refresh key; plain text only, scrolled by Houston. Tab
+// promotes the view to a persistent TUI tab (digit keys / [ ] cycling);
+// its key then jumps to the tab instead of opening a transient page.
 type View struct {
 	ID        string   `json:"id"`
 	Key       string   `json:"key"`
 	Title     string   `json:"title"`
 	Command   []string `json:"command"`
 	TimeoutMs int      `json:"timeoutMs"`
+	Tab       bool     `json:"tab"`
 }
 
 // Surface identifies which per-surface timeout default and clamp applies to

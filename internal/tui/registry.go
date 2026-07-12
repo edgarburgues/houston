@@ -12,11 +12,14 @@ import "strings"
 
 // Registry screen ids. scrMissions and scrAccounts match the manifest's
 // Action.Screen values so module entries map one-to-one; scrModView is the
-// full-screen module-view page, which only core bindings live on.
+// full-screen module-view page, which only core bindings live on. scrGlobal
+// commands (tab switching) dispatch before any screen handler and join every
+// screen's conflict table and overlay.
 const (
 	scrMissions = "missions"
 	scrAccounts = "accounts"
 	scrModView  = "modview"
+	scrGlobal   = "global"
 )
 
 type cmdOrigin int
@@ -44,6 +47,11 @@ type command struct {
 // lives in the overlay, which is the fix for help outgrowing one line.
 func coreCommands() []command {
 	return []command{
+		// global: tab switching, dispatched before any screen handler. First
+		// in the slice so the overlay's Tabs section leads on every screen.
+		{keys: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}, label: "1-9", title: "switch tab", screen: scrGlobal, category: "Tabs"},
+		{keys: []string{"[", "]"}, label: "[/]", title: "previous / next tab", screen: scrGlobal, category: "Tabs"},
+
 		// missions screen
 		{keys: []string{"up", "k"}, label: "↑/k", title: "move up", screen: scrMissions, category: "Navigate"},
 		{keys: []string{"down", "j"}, label: "↓/j", title: "move down", screen: scrMissions, category: "Navigate"},
@@ -92,8 +100,8 @@ func coreCommands() []command {
 	}
 }
 
-// builtinKeyTable collects the dispatch keys of every core command on a
-// screen — the conflict tables module actions and views are checked against.
+// builtinKeyTable collects the dispatch keys of every core command on ONE
+// screen — the drift test compares each key switch against exactly this.
 func builtinKeyTable(screen string) map[string]bool {
 	out := map[string]bool{}
 	for _, c := range coreCommands() {
@@ -101,6 +109,18 @@ func builtinKeyTable(screen string) map[string]bool {
 			continue
 		}
 		for _, k := range c.keys {
+			out[k] = true
+		}
+	}
+	return out
+}
+
+// unionKeys merges key tables — the exported conflict tables are a screen's
+// own keys plus the global ones, so a module can never claim a tab key.
+func unionKeys(tables ...map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for _, t := range tables {
+		for k := range t {
 			out[k] = true
 		}
 	}

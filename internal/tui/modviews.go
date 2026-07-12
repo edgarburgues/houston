@@ -1,11 +1,14 @@
 package tui
 
 // Module views: full-screen read-only pages contributed by modules, opened
-// from the missions screen by their manifest key. Content is fetched OFF the
-// event loop (tea.Cmd goroutine through the hardened Invoke) and stamped with
-// a generation so a slow render can never paint over a newer one — the
-// xformGen precedent. Keys inside a view: esc/backspace back, r refresh,
-// arrows/jk/pgup/pgdn scroll. Built-in missions keys and this module's own
+// from the missions screen by their manifest key or promoted to persistent
+// tabs with "tab": true (tabs.go). Content is fetched OFF the event loop
+// (tea.Cmd goroutine through the hardened Invoke) into a per-view retained
+// state — viewport, last title, generation — so tab switches and re-opens
+// never re-execute a handler; r refreshes the visible view and a stale
+// render can never paint over a newer one (the xformGen precedent). Keys
+// inside a view: esc/backspace back to Missions, r refresh, arrows/jk and
+// pgup/pgdn scroll, ? help. Built-in missions keys and this module's own
 // action keys win conflicts at load time, like actions do.
 
 import (
@@ -13,6 +16,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"houston/internal/module"
@@ -22,6 +26,20 @@ import (
 type moduleViewRef struct {
 	mod  module.Module
 	view module.View
+}
+
+// viewKey identifies a view's retained state across renders and tabs.
+func viewKey(ref moduleViewRef) string { return ref.mod.Name + "/" + ref.view.ID }
+
+// modViewState is one view's retained screen state. Held by pointer in
+// Model.mvStates: Bubble Tea copies the model by value on every Update and
+// the state must survive those copies.
+type modViewState struct {
+	vp       viewport.Model
+	title    string // last title the handler returned ("" until loaded)
+	gen      int    // generation of the newest dispatched render
+	loaded   bool   // a render landed; activations reuse it
+	inflight bool   // a render is being fetched; don't double-dispatch
 }
 
 // modViewMsg carries one finished view render.
@@ -62,15 +80,47 @@ func buildModViews(mods []module.Module, actionKeys map[string]bool) (map[string
 	return refs, accepted, warns
 }
 
-// openModuleView switches to the view screen and dispatches its first render.
+// ensureViewState returns the view's retained state, creating it (and the
+// map, for bare test models) on first use. Pointer receiver: callers hold
+// the model copy the assignment must land on.
+func (m *Model) ensureViewState(ref moduleViewRef) *modViewState {
+	if m.mvStates == nil {
+		m.mvStates = map[string]*modViewState{}
+	}
+	k := viewKey(ref)
+	st, ok := m.mvStates[k]
+	if !ok {
+		st = &modViewState{vp: viewport.New(m.width-4, m.bodyH()-2)}
+		m.mvStates[k] = st
+	}
+	return st
+}
+
+// viewFetchCmd dispatches a render for the view unless its retained state is
+// already loaded or in flight. Callers own the screen/tab bookkeeping.
+func (m *Model) viewFetchCmd(ref moduleViewRef) tea.Cmd {
+	st := m.ensureViewState(ref)
+	if st.loaded || st.inflight {
+		return nil
+	}
+	st.gen++
+	st.inflight = true
+	st.vp.SetContent(dimStyle.Render("loading " + ref.view.Title + "…"))
+	st.vp.GotoTop()
+	return renderViewCmd(m.modCtx, ref, st.gen)
+}
+
+// openModuleView shows a view: promoted views jump to their tab, the rest
+// open the transient full-screen page. Retained content shows instantly; a
+// first visit fetches.
 func (m Model) openModuleView(ref moduleViewRef) (tea.Model, tea.Cmd) {
+	if idx, ok := m.tabIdx[viewKey(ref)]; ok {
+		return m.switchTab(idx)
+	}
 	m.screen = screenModuleView
 	m.mvRef = ref
-	m.mvTitle = ref.view.Title
-	m.mvGen++
-	m.mv.SetContent(dimStyle.Render("loading " + ref.view.Title + "…"))
-	m.mv.GotoTop()
-	return m, renderViewCmd(m.modCtx, ref, m.mvGen)
+	m.status = hintFor(m.registry, scrModView)
+	return m, m.viewFetchCmd(ref)
 }
 
 // renderViewCmd fetches one view render off the event loop; recovers like
@@ -87,63 +137,96 @@ func renderViewCmd(ctx context.Context, ref moduleViewRef, gen int) tea.Cmd {
 	}
 }
 
-// onModViewMsg installs a finished render; stale generations are dropped.
+// onModViewMsg lands a finished render in the view's retained state; stale
+// generations are dropped. A failure on the visible view falls back to the
+// missions tab with the footer notice; one on a background view keeps its
+// state unloaded (the next activation retries) and still notes the failure.
 func (m Model) onModViewMsg(msg modViewMsg) (tea.Model, tea.Cmd) {
-	if m.screen != screenModuleView || msg.gen != m.mvGen {
+	key := msg.mod + "/" + msg.id
+	st, ok := m.mvStates[key]
+	if !ok || msg.gen != st.gen {
 		return m, nil
 	}
+	st.inflight = false
 	if msg.err != nil {
-		m.screen = screenMissions
+		st.loaded = false
+		if m.screen == screenModuleView && viewKey(m.mvRef) == key {
+			m.screen = screenMissions
+			m.tabCur = 0
+		}
 		m.status = actionFailStatus(msg.mod, msg.id, msg.err)
 		return m, nil
 	}
-	m.mvTitle = msg.title
+	st.loaded = true
+	st.title = msg.title
 	if strings.TrimSpace(msg.body) == "" {
-		m.mv.SetContent(dimStyle.Render("(the view returned nothing)"))
+		st.vp.SetContent(dimStyle.Render("(the view returned nothing)"))
 	} else {
-		m.mv.SetContent(msg.body)
+		st.vp.SetContent(msg.body)
 	}
 	return m, nil
 }
 
 // updateModuleViewKeys handles keys while a module view owns the screen.
 func (m Model) updateModuleViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	st := m.ensureViewState(m.mvRef)
 	switch msg.String() {
 	case "q", "ctrl+c":
 		m.modCancel()
 		return m, tea.Quit
 	case "esc", "backspace":
+		// esc always goes home: transient views were opened from Missions,
+		// and from a tab view home is the Missions tab.
 		m.screen = screenMissions
+		m.tabCur = 0
+		m.status = hintFor(m.registry, scrMissions)
 		return m, nil
 	case "?":
 		m.helpOpen = true
 		m.helpScroll = 0
 		return m, nil
 	case "r":
-		m.mvGen++
-		m.mv.SetContent(dimStyle.Render("refreshing " + m.mvRef.view.Title + "…"))
-		return m, renderViewCmd(m.modCtx, m.mvRef, m.mvGen)
+		// Refresh keeps the current content on screen (no flash): the footer
+		// says what's happening and the reply swaps the body in.
+		st.gen++
+		st.inflight = true
+		m.status = "refreshing " + m.mvRef.view.Title + "…"
+		return m, renderViewCmd(m.modCtx, m.mvRef, st.gen)
 	case "up", "k":
-		m.mv.ScrollUp(1)
+		st.vp.ScrollUp(1)
 	case "down", "j":
-		m.mv.ScrollDown(1)
+		st.vp.ScrollDown(1)
 	case "pgup", "b":
-		m.mv.HalfPageUp()
+		st.vp.HalfPageUp()
 	case "pgdown", "f", " ":
-		m.mv.HalfPageDown()
+		st.vp.HalfPageDown()
 	case "g":
-		m.mv.GotoTop()
+		st.vp.GotoTop()
 	case "G":
-		m.mv.GotoBottom()
+		st.vp.GotoBottom()
 	}
 	return m, nil
 }
 
-// viewModuleView renders the full-screen page: title bar, scrollable body,
-// key footer.
+// viewModuleView renders the page: the tab strip when the view is a tab, a
+// title bar when transient; scrollable body; hint footer.
 func (m Model) viewModuleView() string {
-	header := headerStyle.Width(m.width).Render("▤ " + m.mvTitle + "  · " + m.mvRef.mod.Name)
-	body := paneFocused.Width(m.width - 2).Height(m.bodyH() - 2).Render(m.mv.View())
+	st := m.mvStates[viewKey(m.mvRef)]
+	body := ""
+	title := m.mvRef.view.Title
+	if st != nil {
+		body = st.vp.View()
+		if st.title != "" {
+			title = st.title
+		}
+	}
+	var header string
+	if _, ok := m.tabIdx[viewKey(m.mvRef)]; ok {
+		header = m.viewTabBar(m.mvRef.mod.Name)
+	} else {
+		header = headerStyle.Width(m.width).Render("▤ " + title + "  · " + m.mvRef.mod.Name)
+	}
+	box := paneFocused.Width(m.width - 2).Height(m.bodyH() - 2).Render(body)
 	footer := footerStyle.Width(m.width).Render(hintFor(m.registry, scrModView))
-	return header + "\n" + body + "\n" + footer
+	return header + "\n" + box + "\n" + footer
 }

@@ -18,7 +18,7 @@ A module can contribute to six exec'd surfaces, plus one declarative one:
 | Preview sections | `transforms.preview` | `preview.append` | append sections to the selected mission's preview pane |
 | Statusline segment | `statusline` | `statusline.segment` | one cached text segment in `houston statusline` |
 | Pre-launch hook | `preLaunch` | `launch.before` | interactive gate before every claude launch (exit 0 = continue, else cancel) |
-| Full-screen view | `views[]` | `view.render` | a read-only page opened from the missions screen by its key; r refreshes, esc returns |
+| Full-screen view | `views[]` | `view.render` | a read-only page opened from the missions screen by its key; `"tab": true` promotes it to a persistent tab; r refreshes, esc returns |
 | Theme | `theme` | — | color/layout overrides, no handler involved |
 
 ## Quick start
@@ -314,6 +314,16 @@ STIC-2  ..." }
 `title` (<= 60 runes) defaults to the manifest title; `body` is clamped to
 256 KiB. The page re-renders on `r`; `esc` returns to the missions screen.
 A failed render drops back to the missions screen with the footer notice.
+
+Adding `"tab": true` to a view promotes it to a persistent TUI tab: it
+joins the tab strip after Missions and Accounts (digits `1-9` jump, `[`/`]`
+cycle, from every screen), renders once on first activation and keeps its
+content, scroll position and last title across tab switches — the handler
+runs again only on `r`. The returned `title` becomes the live tab label
+(`"My issues (17)"` puts a counter in the strip), and the view's missions
+key jumps to the tab instead of opening a transient page. Rendered content
+is retained for transient views too: reopening one shows the last render
+instantly, `r` refreshes it.
 
 ### `launch.before`
 

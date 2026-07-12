@@ -41,16 +41,17 @@ type helpSection struct {
 	rows   []command
 }
 
-// helpSections groups a screen's commands: core categories in first-appearance
-// order, then module sections sorted by module name (a module's actions and
-// views share one section regardless of registry order).
+// helpSections groups a screen's commands: global commands (Tabs) and core
+// categories in first-appearance order, then module sections sorted by
+// module name (a module's actions and views share one section regardless of
+// registry order).
 func helpSections(reg []command, screen string) []helpSection {
 	var out []helpSection
 	idx := map[string]int{}
 	mods := map[string][]command{}
 	var modNames []string
 	for _, c := range reg {
-		if c.screen != screen {
+		if c.screen != screen && c.screen != scrGlobal {
 			continue
 		}
 		if c.origin == originModule {

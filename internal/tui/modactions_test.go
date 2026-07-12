@@ -67,9 +67,10 @@ func TestBuiltinKeyTablesMatchSwitches(t *testing.T) {
 		file, fn string
 		table    map[string]bool
 	}{
-		{"app.go", "updateKeys", BuiltinMissionsKeys},
-		{"app.go", "updateAccountsKeys", BuiltinAccountsKeys},
+		{"app.go", "updateKeys", builtinKeyTable(scrMissions)},
+		{"app.go", "updateAccountsKeys", builtinKeyTable(scrAccounts)},
 		{"modviews.go", "updateModuleViewKeys", builtinKeyTable(scrModView)},
+		{"tabs.go", "updateGlobalKeys", builtinKeyTable(scrGlobal)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.fn, func(t *testing.T) {

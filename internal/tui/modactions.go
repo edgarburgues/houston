@@ -17,16 +17,18 @@ import (
 	"houston/internal/module"
 )
 
-// BuiltinMissionsKeys and BuiltinAccountsKeys mirror the case sets of
-// updateKeys and updateAccountsKeys, derived from the command registry so
-// the switches, the conflict tables and the help overlay share one source.
-// Conditionally-consumed keys ("x" only acts inside a program view) stay
-// reserved: partial consumption must not make a binding intermittently
-// module-owned. A drift test asserts each table equals its switch's cases,
-// and `module ls`/doctor consult them to flag shadowed keys.
+// BuiltinMissionsKeys and BuiltinAccountsKeys are the conflict tables module
+// contributions are checked against: the screen's own keys (mirroring its
+// switch cases) plus the global tab-switching keys, all derived from the
+// command registry so the switches, the tables and the help overlay share
+// one source. Conditionally-consumed keys ("x" only acts inside a program
+// view) stay reserved: partial consumption must not make a binding
+// intermittently module-owned. A drift test asserts each per-screen table
+// equals its switch's cases, and `module ls`/doctor consult these to flag
+// shadowed keys.
 var (
-	BuiltinMissionsKeys = builtinKeyTable(scrMissions)
-	BuiltinAccountsKeys = builtinKeyTable(scrAccounts)
+	BuiltinMissionsKeys = unionKeys(builtinKeyTable(scrMissions), builtinKeyTable(scrGlobal))
+	BuiltinAccountsKeys = unionKeys(builtinKeyTable(scrAccounts), builtinKeyTable(scrGlobal))
 )
 
 // moduleActionRef pairs an action with its owning module for dispatch.

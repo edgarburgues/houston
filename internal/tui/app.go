@@ -98,6 +98,12 @@ type Model struct {
 	helpOpen   bool
 	helpScroll int
 
+	// tab shell (tabs.go): the strip, the active index and the view-key →
+	// tab index map for promoted module views.
+	tabs   []tabRef
+	tabCur int
+	tabIdx map[string]int
+
 	// modules
 	mods       []module.Module            // enabled, loaded once in New, immutable
 	modActions map[string]moduleActionRef // "missions:J" → the winning module action
@@ -119,23 +125,23 @@ type Model struct {
 	prevCache      map[string][]module.Section // preview sections by mission key
 	lastPreviewKey string                      // selection-identity tracker for the preview fetch
 
-	// accounts screen
+	// accounts screen. accsSeen arms the first-activation load+probe; later
+	// tab switches keep the state and r reloads.
 	screen     screen
 	accs       []accounts.Account
 	accProbes  map[string]usage.Probe
 	accCur     int
 	accProbing bool
+	accsSeen   bool
 	// pendingDelete arms the two-step account delete: the id whose removal the
 	// next d/x press confirms. Any other key disarms it.
 	pendingDelete string
 
-	// module views (modviews.go): the open full-screen page, its viewport
-	// and the generation stamp that drops stale renders.
+	// module views (modviews.go): key dispatch map, the view currently on
+	// screen and every view's retained state (viewport, title, generation).
 	modViews map[string]moduleViewRef
-	mv       viewport.Model
 	mvRef    moduleViewRef
-	mvTitle  string
-	mvGen    int
+	mvStates map[string]*modViewState
 
 	// pending is a claude launch parked while its pre-launch hooks run
 	// (modprelaunch.go); nil when no launch is in flight. launchGen stamps
@@ -200,6 +206,8 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 	// dropped contribution can never be advertised.
 	m.registry = append(coreCommands(), moduleCommands(accepted, vaccepted)...)
 	m.status = "Houston ready · " + hintFor(m.registry, scrMissions)
+	m.tabs, m.tabIdx = buildTabs(vaccepted)
+	m.mvStates = map[string]*modViewState{}
 	if warns := append(append([]string{}, loadWarns...), actionWarns...); len(warns) > 0 {
 		// Skipped modules and dropped actions surface once at startup;
 		// ls/doctor show them too.
@@ -231,6 +239,7 @@ var (
 	labelStyle, valStyle, pinStyle, tagStyle              lipgloss.Style
 	helpTitleStyle, helpSectionStyle, helpModSectionStyle lipgloss.Style
 	helpBorderStyle                                       lipgloss.Style
+	tabActiveStyle, tabInactiveStyle, tabBrandStyle       lipgloss.Style
 
 	// curLayout is copied by New into Model.lay, so pane math never reads
 	// mutable package state after startup.
@@ -263,6 +272,9 @@ func applyTheme(t theme.Theme) {
 	helpSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
 	helpModSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(cGreen)
 	helpBorderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cBlue).Padding(0, 2)
+	tabActiveStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(cBlue)
+	tabInactiveStyle = lipgloss.NewStyle().Foreground(cGrey)
+	tabBrandStyle = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
 
 	curLayout = t.Layout
 }
@@ -488,10 +500,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.preview = viewport.New(m.rightW()-2, m.bodyH()-2)
-		mvContent := m.mv.View()
-		m.mv = viewport.New(m.width-4, m.bodyH()-2)
-		if m.screen == screenModuleView {
-			m.mv.SetContent(mvContent)
+		// Resize every retained view state in place: content survives, the
+		// window just re-crops on the next render.
+		for _, st := range m.mvStates {
+			st.vp.Width = m.width - 4
+			st.vp.Height = m.bodyH() - 2
 		}
 		m.ready = true
 		m.refresh()
@@ -575,6 +588,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.helpOpen {
 			return m.updateHelpKeys(msg)
 		}
+		if nm, cmd, consumed := m.updateGlobalKeys(msg); consumed {
+			return nm, cmd
+		}
 		if m.screen == screenAccounts {
 			return m.updateAccountsKeys(msg)
 		}
@@ -588,22 +604,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func probeAccountsCmd(accs []accounts.Account) tea.Cmd {
 	return func() tea.Msg { return accProbeMsg{usage.ProbeAll(accs, 8*time.Second)} }
-}
-
-func (m Model) enterAccounts() (tea.Model, tea.Cmd) {
-	m.accs, _ = accounts.Load()
-	m.screen = screenAccounts
-	m.accCur = 0
-	// The footer is the status line on every screen now (so the two-step
-	// delete confirmation is actually visible); entering seeds it with the
-	// screen's hint.
-	m.status = hintFor(m.registry, scrAccounts)
-	m.accProbes = map[string]usage.Probe{}
-	if len(m.accs) > 0 {
-		m.accProbing = true
-		return m, probeAccountsCmd(m.accs)
-	}
-	return m, nil
 }
 
 func (m Model) curAccount() (accounts.Account, bool) {
@@ -623,8 +623,7 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.modCancel() // root cancel: every in-flight module exec dies with the TUI
 		return m, tea.Quit
 	case "esc", "A", "tab":
-		m.screen = screenMissions
-		m.status = hintFor(m.registry, scrMissions)
+		return m.switchTab(0)
 	case "?":
 		m.helpOpen = true
 		m.helpScroll = 0
@@ -637,6 +636,16 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.accCur++
 		}
 	case "r":
+		// Reload the list too, not just the probes: accounts added from a
+		// CLI while the TUI is open must be reachable without a restart now
+		// that activation loads only once.
+		m.accs, _ = accounts.Load()
+		if m.accCur >= len(m.accs) {
+			m.accCur = len(m.accs) - 1
+		}
+		if m.accCur < 0 {
+			m.accCur = 0
+		}
 		if len(m.accs) > 0 {
 			m.accProbing = true
 			return m, probeAccountsCmd(m.accs)
@@ -698,7 +707,7 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.helpOpen = true
 		m.helpScroll = 0
 	case "A":
-		return m.enterAccounts()
+		return m.switchTab(1)
 	case "tab":
 		if m.focus == focusLeft {
 			m.focus = focusMid
@@ -1089,7 +1098,7 @@ func (m Model) View() string {
 	if m.screen == screenModuleView {
 		return m.viewModuleView()
 	}
-	header := headerStyle.Width(m.width).Render(fmt.Sprintf("🚀 Houston   %d missions   ·   %d programs   ·   [A] accounts", len(m.missions), len(m.st.Programs)))
+	header := m.viewTabBar(fmt.Sprintf("%d missions · %d programs", len(m.missions), len(m.st.Programs)))
 
 	left := m.viewLeft()
 	mid := m.viewMid()
@@ -1263,7 +1272,7 @@ func safeName(title, id string) string {
 }
 
 func (m Model) viewAccounts() string {
-	header := headerStyle.Width(m.width).Render(fmt.Sprintf("🚀 Houston · Accounts (%d)   ·   [esc] back", len(m.accs)))
+	header := m.viewTabBar(fmt.Sprintf("%d accounts", len(m.accs)))
 	w := m.width - 2
 	h := m.bodyH() - 2
 	var lines []string
