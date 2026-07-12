@@ -103,13 +103,19 @@ ctrl aliases are **rejected at validation** because the terminal normalizes
 them into other keys and they could never fire: `ctrl+i` (arrives as `tab`),
 `ctrl+m` (`enter`), `ctrl+[` (`esc`), `ctrl+h` (`backspace`).
 
-Built-in keys always win. A module action whose key collides with a built-in
-is dropped at startup with a warning (visible in `module ls` and `doctor`),
-never intermittently routed. Reserved on the missions screen:
-`q ctrl+c ? A tab up down k j left right h l / esc pgdown pgup f b enter * a
-t n p P x e r` — and on the accounts screen: `q ctrl+c esc A tab up k down j
-r d x enter`. Between modules, the first claimant in lexicographic name
-order keeps the key.
+Built-in keys always win. A module action or view whose key collides with a
+built-in is dropped at startup with a warning (visible in `module ls` and
+`doctor`), never intermittently routed. The tab keys `1 2 3 4 5 6 7 8 9 [ ]`
+are reserved on **every** screen. Additionally reserved on the missions
+screen: `q ctrl+c ? A tab up down k j left right h l / esc pgdown pgup f b
+enter * a t n m p P x e r` — and on the accounts screen: `q ctrl+c esc ? A
+tab up k down j r d x enter`.
+
+Between modules: all modules' **actions** claim their keys first (in
+lexicographic module-name order), then all **views** do — so any module's
+missions action beats any module's view on the same key, and within each
+class the first claimant in lexicographic name order keeps it. Losers are
+dropped with the same startup warning and show up in `module ls`/`doctor`.
 
 ### Command resolution
 
@@ -302,8 +308,9 @@ segment silently disappears — an error string never reaches the line.
 Views are module-contributed full-screen pages: read-only, plain text
 (ANSI/control stripped), scrolled by Houston. Declared as
 `"views": [{"id": "issues", "key": "I", "title": "Jira issues", "command":
-[...]}]` (max 8 per module; keys share the missions screen space with the
-module's own actions, built-ins win). Payload: `{ "view": "issues" }`.
+[...]}]` (max 8 per module; view keys share the missions screen space with
+EVERY module's missions actions — actions claim first, then views, see the
+Action keys section — and built-ins win). Payload: `{ "view": "issues" }`.
 Reply:
 
 ```json

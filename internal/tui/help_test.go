@@ -33,22 +33,26 @@ func TestHelpOverlayScrollClamps(t *testing.T) {
 	m := newModel(t)
 	// Narrow forces one column; short forces scrolling.
 	m = drive(m, tea.WindowSizeMsg{Width: 60, Height: 12}, runes("?"))
-	lines, winH := m.helpLines()
+	lines, winH, _ := m.helpLines()
 	if len(lines) <= winH {
 		t.Fatalf("scenario should overflow: %d lines in a %d window", len(lines), winH)
 	}
 	max := len(lines) - winH
-	m = drive(m, runes("G"))
+	for i := 0; i < 30; i++ {
+		m = drive(m, key(tea.KeyPgDown))
+	}
 	if m.helpScroll != max {
-		t.Errorf("G should land on the last window, got %d want %d", m.helpScroll, max)
+		t.Errorf("paging past the end must clamp to the last window, got %d want %d", m.helpScroll, max)
 	}
 	m = drive(m, runes("j"))
 	if m.helpScroll != max {
 		t.Errorf("scrolling past the end must clamp, got %d", m.helpScroll)
 	}
-	m = drive(m, runes("g"))
+	for i := 0; i < 30; i++ {
+		m = drive(m, key(tea.KeyPgUp))
+	}
 	if m.helpScroll != 0 {
-		t.Errorf("g should jump to the top, got %d", m.helpScroll)
+		t.Errorf("paging above the top must clamp to 0, got %d", m.helpScroll)
 	}
 	m = drive(m, runes("k"))
 	if m.helpScroll != 0 {
@@ -56,6 +60,40 @@ func TestHelpOverlayScrollClamps(t *testing.T) {
 	}
 	if !strings.Contains(m.View(), "j/k scroll") {
 		t.Errorf("an overflowing overlay should show the scroll position line")
+	}
+}
+
+// TestWhichKeyRunsEveryAdvertisedCommand locks the launcher contract: q and
+// enter are registry commands, so from the overlay they must RUN (quit,
+// resume), not silently close — and only esc/backspace/? are close keys.
+func TestWhichKeyRunsEveryAdvertisedCommand(t *testing.T) {
+	m := newModel(t)
+	m = drive(m, runes("?"))
+	tm, cmd := m.Update(runes("q"))
+	if cmd == nil {
+		t.Fatal("q from the overlay must redispatch to quit")
+	}
+	m = tm.(Model)
+	if m.helpOpen {
+		t.Fatal("redispatch must close the overlay")
+	}
+}
+
+// TestHelpOverlaySlimHeights keeps the panel inside very short terminals by
+// dropping the title chrome instead of the content.
+func TestHelpOverlaySlimHeights(t *testing.T) {
+	m := newModel(t)
+	m = drive(m, tea.WindowSizeMsg{Width: 60, Height: 8}, runes("?"))
+	_, _, slim := m.helpLines()
+	if !slim {
+		t.Fatal("height 8 should trigger the slim panel")
+	}
+	view := m.View()
+	if strings.Contains(view, "Help — Missions") {
+		t.Errorf("the slim panel must drop the title chrome")
+	}
+	if got := len(strings.Split(view, "\n")); got > 8 {
+		t.Errorf("the frame must fit the terminal: %d lines in height 8", got)
 	}
 }
 

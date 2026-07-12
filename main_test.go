@@ -107,3 +107,47 @@ func TestRunPreLaunchHooks(t *testing.T) {
 		}
 	})
 }
+
+// TestShadowedKeysAuditsViews pins the ls/doctor audit to the same rules the
+// TUI applies when it drops views: built-in keys (tab keys included), any
+// module's missions action, and earlier modules' views. A "tab": true view
+// that loses its key loses its whole tab, so the audit must name it.
+func TestShadowedKeysAuditsViews(t *testing.T) {
+	mods := []module.Module{
+		{Entry: module.Entry{Name: "aaa", Enabled: true}, Manifest: module.Manifest{
+			API: 1, Name: "aaa",
+			Actions: []module.Action{{ID: "act", Key: "Y", Title: "t", Screen: "missions"}},
+		}},
+		{Entry: module.Entry{Name: "bbb", Enabled: true}, Manifest: module.Manifest{
+			API: 1, Name: "bbb",
+			Views: []module.View{
+				{ID: "digit", Key: "1", Title: "t", Tab: true}, // built-in tab key
+				{ID: "vsact", Key: "Y", Title: "t"},            // any module's action wins
+				{ID: "ok", Key: "I", Title: "t"},               // survives
+			},
+		}},
+		{Entry: module.Entry{Name: "ccc", Enabled: true}, Manifest: module.Manifest{
+			API: 1, Name: "ccc",
+			Views: []module.View{{ID: "dup", Key: "I", Title: "t"}}, // earlier view wins
+		}},
+	}
+	warns := shadowedKeys(mods)
+	if len(warns) != 3 {
+		t.Fatalf("want 3 view warnings, got %d: %v", len(warns), warns)
+	}
+	for _, want := range []string{
+		`bbb: tab view "digit" key "1" is shadowed by a built-in key`,
+		`bbb: view "vsact" key "Y" is shadowed by module aaa's action`,
+		`ccc: view "dup" key "I" is shadowed by module bbb`,
+	} {
+		found := false
+		for _, w := range warns {
+			if w == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("missing warning %q in %v", want, warns)
+		}
+	}
+}

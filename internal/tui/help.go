@@ -77,9 +77,10 @@ func helpSections(reg []command, screen string) []helpSection {
 }
 
 // helpLines builds the styled overlay content for the current screen plus
-// the window height available to it. Shared by the renderer and the scroll
-// clamp so both always agree on the scroll range.
-func (m Model) helpLines() ([]string, int) {
+// the window height available to it and whether the panel runs slim (no
+// title chrome, for very short terminals). Shared by the renderer and the
+// scroll clamp so both always agree on the scroll range.
+func (m Model) helpLines() ([]string, int, bool) {
 	secs := helpSections(m.registry, m.helpScreen())
 	labelW := 0
 	for _, s := range secs {
@@ -89,6 +90,13 @@ func (m Model) helpLines() ([]string, int) {
 			}
 		}
 	}
+	// Titles are clipped so a single row can never outgrow the panel's
+	// horizontal budget (borders+padding 6, indent 2, label, gap 2) — module
+	// titles run up to 40 runes and must not push the border off screen.
+	maxTitle := m.width - 6 - 2 - labelW - 2
+	if maxTitle < 8 {
+		maxTitle = 8
+	}
 	var blocks [][]string
 	total := 0
 	for _, s := range secs {
@@ -96,20 +104,21 @@ func (m Model) helpLines() ([]string, int) {
 		if s.module {
 			st = helpModSectionStyle
 		}
-		lines := []string{st.Render(s.title)}
+		lines := []string{st.Render(clip(s.title, maxTitle+labelW+2))}
 		for _, c := range s.rows {
 			// Pad AFTER styling with the plain label's width, so the ANSI
 			// escapes never skew the column alignment.
 			pad := strings.Repeat(" ", labelW-lipgloss.Width(c.label))
-			lines = append(lines, "  "+keyStyle.Render(c.label)+pad+"  "+c.title)
+			lines = append(lines, "  "+keyStyle.Render(c.label)+pad+"  "+clip(c.title, maxTitle))
 		}
 		blocks = append(blocks, lines)
 		total += len(lines) + 1
 	}
-	// Two balanced columns when the terminal is wide enough; sections never
-	// split across columns.
+	// Two balanced columns when they actually fit — measured against the
+	// terminal, not guessed from a fixed width. Sections never split across
+	// columns.
 	var content string
-	if m.width >= 84 && len(blocks) > 1 {
+	if len(blocks) > 1 && m.width >= 84 {
 		split, run := len(blocks), 0
 		for i, b := range blocks {
 			run += len(b) + 1
@@ -121,12 +130,20 @@ func (m Model) helpLines() ([]string, int) {
 		if split >= len(blocks) {
 			split = len(blocks) - 1 // never leave the right column empty
 		}
-		content = lipgloss.JoinHorizontal(lipgloss.Top, joinBlocks(blocks[:split]), "     ", joinBlocks(blocks[split:]))
-	} else {
+		twoCol := lipgloss.JoinHorizontal(lipgloss.Top, joinBlocks(blocks[:split]), "     ", joinBlocks(blocks[split:]))
+		if lipgloss.Width(twoCol) <= m.width-6 {
+			content = twoCol
+		}
+	}
+	if content == "" {
 		content = joinBlocks(blocks)
 	}
 	lines := strings.Split(content, "\n")
-	budget := m.bodyH() - 4 // panel borders + title line + blank line
+	slim := m.bodyH() < 9 // drop the title chrome before dropping content
+	budget := m.bodyH() - 2
+	if !slim {
+		budget -= 2 // title line + blank line
+	}
 	winH := len(lines)
 	if winH > budget {
 		winH = budget - 1 // one row goes to the scroll position line
@@ -134,7 +151,7 @@ func (m Model) helpLines() ([]string, int) {
 			winH = 1
 		}
 	}
-	return lines, winH
+	return lines, winH, slim
 }
 
 func joinBlocks(blocks [][]string) string {
@@ -145,35 +162,35 @@ func joinBlocks(blocks [][]string) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// updateHelpKeys handles keys while the overlay is open: jk/arrows and
-// pgup/pgdn scroll, g/G jump, esc/q/enter/? close — and any other key closes
-// the overlay AND redispatches to the screen underneath, so pressing the key
-// you just looked up runs it immediately.
+// updateHelpKeys handles keys while the overlay is open: jk/arrows scroll a
+// line, pgup/pgdn a page, esc/backspace/? close — and EVERY other key closes
+// the overlay and redispatches to the screen underneath, so pressing the key
+// you just looked up runs it immediately. The navigation set is restricted
+// to keys no module can ever claim (j/k are core on every screen, pgup/pgdn
+// and esc/backspace are multi-char names outside the manifest key grammar),
+// so the which-key contract — every advertised command is runnable from
+// here — holds for the whole registry, q and enter included.
 func (m Model) updateHelpKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		m.modCancel()
 		return m, tea.Quit
-	case "?", "esc", "q", "enter", "backspace":
+	case "?", "esc", "backspace":
 		m.helpOpen = false
 		return m, nil
 	case "up", "k":
 		m.helpScroll--
 	case "down", "j":
 		m.helpScroll++
-	case "pgup", "b":
+	case "pgup":
 		m.helpScroll -= 8
-	case "pgdown", "f", " ":
+	case "pgdown":
 		m.helpScroll += 8
-	case "g":
-		m.helpScroll = 0
-	case "G":
-		m.helpScroll = 1 << 20 // clamped below
 	default:
 		m.helpOpen = false
 		return m.update(msg)
 	}
-	lines, winH := m.helpLines()
+	lines, winH, _ := m.helpLines()
 	if max := len(lines) - winH; m.helpScroll > max {
 		m.helpScroll = max
 	}
@@ -185,7 +202,7 @@ func (m Model) updateHelpKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // viewHelp renders the overlay frame: header, centered panel, footer.
 func (m Model) viewHelp() string {
-	lines, winH := m.helpLines()
+	lines, winH, slim := m.helpLines()
 	maxOff := len(lines) - winH
 	if maxOff < 0 {
 		maxOff = 0
@@ -209,9 +226,11 @@ func (m Model) viewHelp() string {
 			contentW = w
 		}
 	}
-	inner := []string{
-		lipgloss.PlaceHorizontal(contentW, lipgloss.Center, helpTitleStyle.Render("Help — "+helpScreenNames[m.helpScreen()])),
-		"",
+	var inner []string
+	if !slim {
+		inner = append(inner,
+			lipgloss.PlaceHorizontal(contentW, lipgloss.Center, helpTitleStyle.Render("Help — "+helpScreenNames[m.helpScreen()])),
+			"")
 	}
 	inner = append(inner, lines[off:end]...)
 	if maxOff > 0 {

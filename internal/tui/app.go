@@ -126,13 +126,16 @@ type Model struct {
 	lastPreviewKey string                      // selection-identity tracker for the preview fetch
 
 	// accounts screen. accsSeen arms the first-activation load+probe; later
-	// tab switches keep the state and r reloads.
+	// tab switches keep the state and r reloads. accStale marks the figures
+	// as invalidated by our own launch (last-use, pressure) so the next
+	// activation re-probes without the user having to know to press r.
 	screen     screen
 	accs       []accounts.Account
 	accProbes  map[string]usage.Probe
 	accCur     int
 	accProbing bool
 	accsSeen   bool
+	accStale   bool
 	// pendingDelete arms the two-step account delete: the id whose removal the
 	// next d/x press confirms. Any other key disarms it.
 	pendingDelete string
@@ -516,6 +519,23 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = "back from claude"
 		}
+		// The session we just ran invalidated the accounts figures (last-use,
+		// pressure). Refresh what's visible now; mark the rest stale so the
+		// next activation re-probes instead of showing yesterday's numbers.
+		if m.accsSeen {
+			m.accs, _ = accounts.Load()
+			if m.accCur >= len(m.accs) {
+				m.accCur = len(m.accs) - 1
+			}
+			if m.accCur < 0 {
+				m.accCur = 0
+			}
+			if m.screen == screenAccounts && len(m.accs) > 0 {
+				m.accProbing = true
+				return m, probeAccountsCmd(m.accs)
+			}
+			m.accStale = true
+		}
 		return m, nil
 
 	case hookDoneMsg:
@@ -652,11 +672,15 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "d", "x":
 		// Two-step: one stray keypress must not drop an account ('x' even means
-		// something else on the missions screen).
+		// something else on the missions screen). The second press confirms
+		// ONLY while the prompt is still on screen — if a background message
+		// (module failure, probe note) replaced it, the armed state and the
+		// visible UI have desynced, so re-arm instead of deleting blind.
 		if a, ok := m.curAccount(); ok {
-			if m.pendingDelete != a.ID {
+			prompt := "delete account " + a.ID + "? press d/x again to confirm"
+			if m.pendingDelete != a.ID || m.status != prompt {
 				m.pendingDelete = a.ID
-				m.status = "delete account " + a.ID + "? press d/x again to confirm"
+				m.status = prompt
 				return m, nil
 			}
 			m.pendingDelete = ""

@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"houston/internal/accounts"
 	"houston/internal/module"
 )
 
@@ -112,6 +113,69 @@ func TestAccountsTabStateRetained(t *testing.T) {
 	m = drive(m, runes("1"), runes("2"))
 	if m.pendingDelete != "" {
 		t.Fatal("switching tabs must disarm the pending delete")
+	}
+}
+
+// TestHintNeverClobbersRealStatus locks the seedHint contract: tab switches
+// reseed only disposable footers (ready line, hints, prompts); errors and
+// warnings survive until something newer lands.
+func TestHintNeverClobbersRealStatus(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	m := newModel(t)
+	if !strings.HasPrefix(m.status, "Houston ready") {
+		t.Fatalf("precondition: %q", m.status)
+	}
+	m = drive(m, runes("2"))
+	if m.status != hintFor(m.registry, scrAccounts) {
+		t.Fatalf("the ready line is disposable and should become the hint: %q", m.status)
+	}
+	m.status = "[demo] action dropped: key r is a built-in missions key"
+	m = drive(m, runes("1"), runes("2"), runes("1"))
+	if m.status != "[demo] action dropped: key r is a built-in missions key" {
+		t.Fatalf("a warning must survive tab hops: %q", m.status)
+	}
+}
+
+// TestDeleteConfirmRequiresVisiblePrompt: the second d press confirms only
+// while the prompt is still the visible status — a background message that
+// replaced it re-arms instead of deleting blind.
+func TestDeleteConfirmRequiresVisiblePrompt(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	m := newModel(t)
+	m = drive(m, runes("2"))
+	m.accs = []accounts.Account{{ID: "work"}}
+	m.accCur = 0
+	m = drive(m, runes("d"))
+	prompt := "delete account work? press d/x again to confirm"
+	if m.pendingDelete != "work" || m.status != prompt {
+		t.Fatalf("first press must arm and show the prompt: %q", m.status)
+	}
+	// A background failure stomps the prompt between the two presses.
+	m.status = "[jira] page: context deadline exceeded (see houston module log)"
+	m = drive(m, runes("d"))
+	if len(m.accs) != 1 {
+		t.Fatal("the stomped prompt must not let the delete through")
+	}
+	if m.status != prompt || m.pendingDelete != "work" {
+		t.Fatalf("the second press should re-arm with the prompt visible: %q", m.status)
+	}
+}
+
+// TestExecDoneRefreshesAccounts: coming back from claude invalidates the
+// account figures — visible screen re-probes now, background tab re-probes
+// on its next activation.
+func TestExecDoneRefreshesAccounts(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	m := newModel(t)
+	m = drive(m, runes("2"), runes("1")) // activate accounts once, go back
+	m = drive(m, execDoneMsg{})
+	if !m.accStale {
+		t.Fatal("execDone away from the accounts tab must mark the figures stale")
+	}
+	tm, _ := m.Update(runes("2"))
+	m = tm.(Model)
+	if m.accStale {
+		t.Fatal("activating the accounts tab must consume the stale mark")
 	}
 }
 

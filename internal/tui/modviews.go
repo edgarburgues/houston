@@ -119,7 +119,7 @@ func (m Model) openModuleView(ref moduleViewRef) (tea.Model, tea.Cmd) {
 	}
 	m.screen = screenModuleView
 	m.mvRef = ref
-	m.status = hintFor(m.registry, scrModView)
+	m.seedHint(scrModView)
 	return m, m.viewFetchCmd(ref)
 }
 
@@ -179,7 +179,7 @@ func (m Model) updateModuleViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// and from a tab view home is the Missions tab.
 		m.screen = screenMissions
 		m.tabCur = 0
-		m.status = hintFor(m.registry, scrMissions)
+		m.seedHint(scrMissions)
 		return m, nil
 	case "?":
 		m.helpOpen = true

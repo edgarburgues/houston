@@ -74,11 +74,30 @@ func (m Model) updateGlobalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
+// seedHint replaces the footer with a screen hint only when nothing real is
+// showing: the ready line, another hint and transient prompts are fair game,
+// but errors, warnings and action results survive tab switches — a hint must
+// never destroy a message the user hasn't read (the F5 notices ring will
+// archive these properly).
+func (m *Model) seedHint(screen string) {
+	s := m.status
+	overwritable := s == "" ||
+		strings.HasPrefix(s, "Houston ready") ||
+		strings.HasPrefix(s, "delete account ") ||
+		s == hintFor(m.registry, scrMissions) ||
+		s == hintFor(m.registry, scrAccounts) ||
+		s == hintFor(m.registry, scrModView)
+	if overwritable {
+		m.status = hintFor(m.registry, screen)
+	}
+}
+
 // switchTab activates a tab. Core tabs keep their existing state (Accounts
-// loads and probes once, on first activation); module tabs reuse their
-// retained render and fetch only when they have none. Selecting the current
-// tab is idempotent except that it leaves a transient module view, which is
-// exactly what a tab key should do there.
+// loads and probes on first activation, and again after a claude session
+// invalidated the figures); module tabs reuse their retained render and
+// fetch only when they have none. Selecting the current tab is idempotent
+// except that it leaves a transient module view, which is exactly what a
+// tab key should do there.
 func (m Model) switchTab(n int) (tea.Model, tea.Cmd) {
 	if n < 0 || n >= len(m.tabs) {
 		return m, nil
@@ -88,15 +107,24 @@ func (m Model) switchTab(n int) (tea.Model, tea.Cmd) {
 	switch t := m.tabs[n]; t.kind {
 	case tabMissions:
 		m.screen = screenMissions
-		m.status = hintFor(m.registry, scrMissions)
+		m.seedHint(scrMissions)
 	case tabAccounts:
 		m.screen = screenAccounts
-		m.status = hintFor(m.registry, scrAccounts)
-		if !m.accsSeen {
-			m.accsSeen = true
+		m.seedHint(scrAccounts)
+		if !m.accsSeen || m.accStale {
+			first := !m.accsSeen
+			m.accsSeen, m.accStale = true, false
 			m.accs, _ = accounts.Load()
-			m.accCur = 0
-			m.accProbes = map[string]usage.Probe{}
+			if first {
+				m.accCur = 0
+				m.accProbes = map[string]usage.Probe{}
+			}
+			if m.accCur >= len(m.accs) {
+				m.accCur = len(m.accs) - 1
+			}
+			if m.accCur < 0 {
+				m.accCur = 0
+			}
 			if len(m.accs) > 0 {
 				m.accProbing = true
 				return m, probeAccountsCmd(m.accs)
@@ -105,7 +133,7 @@ func (m Model) switchTab(n int) (tea.Model, tea.Cmd) {
 	case tabModView:
 		m.screen = screenModuleView
 		m.mvRef = t.ref
-		m.status = hintFor(m.registry, scrModView)
+		m.seedHint(scrModView)
 		return m, m.viewFetchCmd(t.ref)
 	}
 	return m, nil
@@ -125,38 +153,75 @@ func (m Model) tabTitle(i int) string {
 }
 
 // viewTabBar renders the one-line strip with right-aligned context info.
-// Labels are budgeted against the width segment by segment — a styled string
-// must never be cut mid-escape, so overflow ends the strip at an ellipsis.
+// Labels are budgeted against the width segment by segment (a styled string
+// must never be cut mid-escape), and the window of rendered tabs is anchored
+// on the ACTIVE tab: when the strip overflows, neighbors are added right
+// then left while they fit and the cut sides end in an ellipsis — the tab
+// the user is on is always visible and highlighted.
 func (m Model) viewTabBar(info string) string {
-	var b strings.Builder
 	brand := "🚀 Houston "
-	b.WriteString(tabBrandStyle.Render(brand))
-	used := lipgloss.Width(brand)
+	avail := m.width - lipgloss.Width(brand)
+	labels := make([]string, len(m.tabs))
+	widths := make([]int, len(m.tabs))
 	for i := range m.tabs {
-		label := fmt.Sprintf(" %d %s ", i+1, clip(m.tabTitle(i), 20))
-		sepW := 0
-		if i > 0 {
-			sepW = 1
+		labels[i] = fmt.Sprintf(" %d %s ", i+1, clip(m.tabTitle(i), 20))
+		widths[i] = lipgloss.Width(labels[i])
+	}
+	// marks is the width the ellipses need for a candidate window.
+	marks := func(lo, hi int) int {
+		n := 0
+		if lo > 0 {
+			n++
 		}
-		if used+sepW+lipgloss.Width(label) > m.width {
-			if used+1 <= m.width {
-				b.WriteString(dimStyle.Render("…"))
-				used++
-			}
-			break
+		if hi < len(m.tabs)-1 {
+			n++
 		}
-		if sepW > 0 {
+		return n
+	}
+	lo, hi := m.tabCur, m.tabCur
+	used := widths[m.tabCur]
+	for {
+		if hi+1 < len(m.tabs) && used+1+widths[hi+1]+marks(lo, hi+1) <= avail {
+			hi++
+			used += 1 + widths[hi]
+			continue
+		}
+		if lo > 0 && used+1+widths[lo-1]+marks(lo-1, hi) <= avail {
+			lo--
+			used += 1 + widths[lo]
+			continue
+		}
+		break
+	}
+	var b strings.Builder
+	b.WriteString(tabBrandStyle.Render(brand))
+	rendered := lipgloss.Width(brand)
+	if lo > 0 {
+		b.WriteString(dimStyle.Render("…"))
+		rendered++
+	}
+	for i := lo; i <= hi; i++ {
+		if i > lo {
 			b.WriteString(dimStyle.Render("│"))
+			rendered++
+		}
+		label := labels[i]
+		if widths[i] > avail { // degenerate: even the active label alone overflows
+			label = clip(label, avail)
 		}
 		if i == m.tabCur {
 			b.WriteString(tabActiveStyle.Render(label))
 		} else {
 			b.WriteString(tabInactiveStyle.Render(label))
 		}
-		used += sepW + lipgloss.Width(label)
+		rendered += lipgloss.Width(label)
+	}
+	if hi < len(m.tabs)-1 {
+		b.WriteString(dimStyle.Render("…"))
+		rendered++
 	}
 	if info != "" {
-		if gap := m.width - used - lipgloss.Width(info) - 1; gap >= 1 {
+		if gap := m.width - rendered - lipgloss.Width(info) - 1; gap >= 1 {
 			b.WriteString(strings.Repeat(" ", gap) + dimStyle.Render(info) + " ")
 		}
 	}

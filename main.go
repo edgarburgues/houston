@@ -812,10 +812,13 @@ func surfacesSummary(man module.Manifest) string {
 	return strings.Join(parts, " ")
 }
 
-// shadowedKeys reports enabled-module action keys that can never fire: keys
-// the built-in TUI tables own (built-ins always win) and keys already
-// claimed by an earlier module in lexicographic name order — the same rules
-// the TUI enforces when it builds its key map at startup.
+// shadowedKeys reports enabled-module action AND view keys that can never
+// fire: keys the built-in TUI tables own (built-ins always win, tab keys
+// included), keys already claimed by an earlier module in lexicographic name
+// order, and — for views — keys any module's missions action holds (all
+// actions claim before any view). These are exactly the rules the TUI
+// enforces when it builds its key maps at startup, so ls/doctor and the TUI
+// can never disagree about what is live.
 func shadowedKeys(mods []module.Module) []string {
 	owner := map[string]string{}
 	var out []string
@@ -838,6 +841,28 @@ func shadowedKeys(mods []module.Module) []string {
 				continue
 			}
 			owner[k] = m.Name
+		}
+	}
+	viewOwner := map[string]string{}
+	for _, m := range mods {
+		if !m.Enabled {
+			continue
+		}
+		for _, v := range m.Manifest.Views {
+			what := "view"
+			if v.Tab {
+				what = "tab view"
+			}
+			switch {
+			case tui.BuiltinMissionsKeys[v.Key]:
+				out = append(out, fmt.Sprintf("%s: %s %q key %q is shadowed by a built-in key", m.Name, what, v.ID, v.Key))
+			case owner["missions:"+v.Key] != "":
+				out = append(out, fmt.Sprintf("%s: %s %q key %q is shadowed by module %s's action", m.Name, what, v.ID, v.Key, owner["missions:"+v.Key]))
+			case viewOwner[v.Key] != "":
+				out = append(out, fmt.Sprintf("%s: %s %q key %q is shadowed by module %s", m.Name, what, v.ID, v.Key, viewOwner[v.Key]))
+			default:
+				viewOwner[v.Key] = m.Name
+			}
 		}
 	}
 	return out
