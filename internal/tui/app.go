@@ -98,6 +98,11 @@ type Model struct {
 	helpOpen   bool
 	helpScroll int
 
+	// command palette (palette.go): fuzzy finder over the registry.
+	palOpen  bool
+	palInput textinput.Model
+	palSel   int
+
 	// tab shell (tabs.go): the strip, the active index and the view-key →
 	// tab index map for promoted module views.
 	tabs   []tabRef
@@ -161,12 +166,16 @@ type accProbeMsg struct{ probes []usage.Probe }
 func New(root string, rescan func() ([]model.Mission, error), st *store.Store, missions []model.Mission, mods []module.Module, loadWarns []string) Model {
 	ti := textinput.New()
 	ti.Prompt = ""
+	pi := textinput.New()
+	pi.Prompt = "▸ "
+	pi.Placeholder = "type a command…"
 	m := Model{
 		root:       root,
 		rescan:     rescan,
 		st:         st,
 		missions:   missions,
 		input:      ti,
+		palInput:   pi,
 		focus:      focusMid,
 		lay:        curLayout,
 		mods:       mods,
@@ -604,6 +613,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.act != actNone {
 			return m.updateInput(msg)
+		}
+		if m.palOpen {
+			return m.updatePaletteKeys(msg)
 		}
 		if m.helpOpen {
 			return m.updateHelpKeys(msg)
@@ -1112,6 +1124,9 @@ func topTools(t map[string]int, n int) string {
 func (m Model) View() string {
 	if !m.ready {
 		return "loading Houston…"
+	}
+	if m.palOpen {
+		return m.viewPalette()
 	}
 	if m.helpOpen {
 		return m.viewHelp()

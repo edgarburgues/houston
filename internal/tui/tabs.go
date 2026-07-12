@@ -70,6 +70,10 @@ func (m Model) updateGlobalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	case "]":
 		nm, cmd := m.switchTab((m.tabCur + 1) % len(m.tabs))
 		return nm, cmd, true
+	case ":", "ctrl+p":
+		m.pendingDelete = ""
+		m.openPalette()
+		return m, nil, true
 	}
 	return m, nil, false
 }

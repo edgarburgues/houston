@@ -61,13 +61,20 @@ func TestModuleCommandsProjectRefs(t *testing.T) {
 // ready status build on: hints are the curated subset, never the full list.
 func TestHintForStaysCurated(t *testing.T) {
 	reg := coreCommands()
-	if got := hintFor(reg, scrMissions); got != "/ search · enter resume · ? help" {
+	if got := hintFor(reg, scrMissions); got != "/ search · enter resume · ? help · : command palette" {
 		t.Errorf("missions hint drifted: %q", got)
 	}
 	acc := hintFor(reg, scrAccounts)
-	for _, want := range []string{"enter launch session", "d/x remove account", "? help"} {
+	for _, want := range []string{"enter launch session", "d/x remove account", "? help", ": command palette"} {
 		if !strings.Contains(acc, want) {
 			t.Errorf("accounts hint should carry %q: %q", want, acc)
+		}
+	}
+	// Hints must never outgrow a normal terminal again — that was the
+	// original sin the overlay fixed.
+	for _, scr := range []string{scrMissions, scrAccounts, scrModView} {
+		if got := hintFor(reg, scr); len([]rune(got)) > 90 {
+			t.Errorf("%s hint too long (%d runes): %q", scr, len([]rune(got)), got)
 		}
 	}
 	mv := hintFor(reg, scrModView)

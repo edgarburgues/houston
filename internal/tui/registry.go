@@ -47,10 +47,13 @@ type command struct {
 // lives in the overlay, which is the fix for help outgrowing one line.
 func coreCommands() []command {
 	return []command{
-		// global: tab switching, dispatched before any screen handler. First
-		// in the slice so the overlay's Tabs section leads on every screen.
+		// global: tab switching and the palette, dispatched before any screen
+		// handler. First in the slice so the overlay's Tabs section leads on
+		// every screen; the palette entry merges into each screen's System
+		// section.
 		{keys: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}, label: "1-9", title: "switch tab", screen: scrGlobal, category: "Tabs"},
 		{keys: []string{"[", "]"}, label: "[/]", title: "previous / next tab", screen: scrGlobal, category: "Tabs"},
+		{keys: []string{":", "ctrl+p"}, label: ":", title: "command palette", screen: scrGlobal, category: "System", hint: true},
 
 		// missions screen
 		{keys: []string{"up", "k"}, label: "↑/k", title: "move up", screen: scrMissions, category: "Navigate"},
@@ -82,8 +85,8 @@ func coreCommands() []command {
 		{keys: []string{"down", "j"}, label: "↓/j", title: "move down", screen: scrAccounts, category: "Navigate"},
 		{keys: []string{"enter"}, label: "enter", title: "launch session", screen: scrAccounts, category: "Account", hint: true},
 		{keys: []string{"d", "x"}, label: "d/x", title: "remove account", screen: scrAccounts, category: "Account", hint: true},
-		{keys: []string{"r"}, label: "r", title: "probe usage", screen: scrAccounts, category: "System", hint: true},
-		{keys: []string{"esc", "A", "tab"}, label: "esc", title: "back to missions", screen: scrAccounts, category: "System", hint: true},
+		{keys: []string{"r"}, label: "r", title: "probe usage", screen: scrAccounts, category: "System"},
+		{keys: []string{"esc", "A", "tab"}, label: "esc", title: "back to missions", screen: scrAccounts, category: "System"},
 		{keys: []string{"?"}, label: "?", title: "help", screen: scrAccounts, category: "System", hint: true},
 		{keys: []string{"q", "ctrl+c"}, label: "q", title: "quit", screen: scrAccounts, category: "System"},
 
@@ -152,12 +155,18 @@ func moduleCommands(acts []moduleActionRef, views []moduleViewRef) []command {
 }
 
 // hintFor joins a screen's hint-flagged commands into the one-line footer
-// hint. Module commands never set the flag: the footer stays short by
-// design and the overlay carries the full list.
+// hint — the screen's own first, then flagged globals (the palette). Module
+// commands never set the flag: the footer stays short by design and the
+// overlay carries the full list.
 func hintFor(reg []command, screen string) string {
 	var parts []string
 	for _, c := range reg {
 		if c.screen == screen && c.hint {
+			parts = append(parts, c.label+" "+c.title)
+		}
+	}
+	for _, c := range reg {
+		if c.screen == scrGlobal && c.hint {
 			parts = append(parts, c.label+" "+c.title)
 		}
 	}
