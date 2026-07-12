@@ -44,38 +44,6 @@ type modActionMsg struct {
 	err             error
 }
 
-// buildModActions filters the enabled modules' actions into the runtime key
-// map ("missions:J" → ref). mods arrive in lexicographic name order, so the
-// first claimant of a key wins; built-in keys always win. Dropped actions
-// come back as footer-ready warnings, surviving ones in deterministic order
-// for the help footers.
-func buildModActions(mods []module.Module) (map[string]moduleActionRef, []moduleActionRef, []string) {
-	refs := map[string]moduleActionRef{}
-	var accepted []moduleActionRef
-	var warns []string
-	for _, mod := range mods {
-		for _, a := range mod.Manifest.Actions {
-			builtin := BuiltinMissionsKeys
-			if a.Screen == "accounts" {
-				builtin = BuiltinAccountsKeys
-			}
-			if builtin[a.Key] {
-				warns = append(warns, fmt.Sprintf("[%s] action %s dropped: %q is a built-in %s key", mod.Name, a.ID, a.Key, a.Screen))
-				continue
-			}
-			id := a.Screen + ":" + a.Key
-			if prev, taken := refs[id]; taken {
-				warns = append(warns, fmt.Sprintf("[%s] action %s dropped: key %q already claimed by module %s", mod.Name, a.ID, a.Key, prev.mod.Name))
-				continue
-			}
-			ref := moduleActionRef{mod: mod, act: a}
-			refs[id] = ref
-			accepted = append(accepted, ref)
-		}
-	}
-	return refs, accepted, warns
-}
-
 // keyLabel renders a binding for the help footer: ctrl+j → ^J.
 func keyLabel(k string) string {
 	if rest, ok := strings.CutPrefix(k, "ctrl+"); ok {

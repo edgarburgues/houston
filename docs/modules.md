@@ -18,7 +18,7 @@ A module can contribute to six exec'd surfaces, plus one declarative one:
 | Preview sections | `transforms.preview` | `preview.append` | append sections to the selected mission's preview pane |
 | Statusline segment | `statusline` | `statusline.segment` | one cached text segment in `houston statusline` |
 | Pre-launch hook | `preLaunch` | `launch.before` | interactive gate before every claude launch (exit 0 = continue, else cancel) |
-| Full-screen view | `views[]` | `view.render` | a read-only page opened from the missions screen by its key; `"tab": true` promotes it to a persistent tab; r refreshes, esc returns |
+| Full-screen view | `views[]` | `view.render` + `view.invoke` | a page opened from the missions screen by its key; `"tab": true` promotes it to a persistent tab; a `rows` reply makes it an interactive list with page `actions`; r refreshes, esc returns |
 | Theme | `theme` | — | color/layout overrides, no handler involved |
 
 ## Quick start
@@ -332,6 +332,51 @@ key jumps to the tab instead of opening a transient page. Rendered content
 is retained for transient views too: reopening one shows the last render
 instantly, `r` refreshes it.
 
+### Interactive rows and `view.invoke`
+
+A `view.render` reply may return `rows` instead of `body`:
+
+```json
+{ "title": "My issues (17)", "rows": [
+  { "id": "SOP-123", "text": "SOP-123  ACTIVO  Alta  07-11  Arreglar el flujo" },
+  { "id": "SOP-124", "text": "SOP-124  NUEVO  Media  07-10  Otra cosa" } ] }
+```
+
+Rows win over `body` when both are present (max 2000 rows; each `text` one
+sanitized line of <= 300 runes, `id` <= 128). Houston then owns the page:
+cursor (`jk`/arrows, `g`/`G`, pgup/pgdn), scrolling and a local `/` filter
+(case-insensitive substring over text and id) — **navigating never execs
+the handler**. The handler runs only on `r` and on the view's declared
+page actions:
+
+```json
+"views": [{ "id": "issues", "key": "I", "title": "My issues", "tab": true,
+  "command": ["pwsh", "-NoProfile", "-File", "jira.ps1"],
+  "actions": [
+    { "id": "open", "key": "enter", "title": "open in browser" },
+    { "id": "comment", "key": "c", "title": "comment", "interactive": true, "refreshAfter": true } ] }]
+```
+
+Action keys are page-scoped (live only while the view is on screen), so two
+views may reuse the same letter; keys the view page itself owns (scroll
+keys, `r`, `esc`, `/`, `?`, the tab keys) are dropped at startup with a
+warning. `"enter"` is allowed here — and only here — as the natural primary
+action of a list. Each action dispatches the view's OWN `command` with a
+`view.invoke` event (there is no per-action argv; the handler switches on
+the event):
+
+```json
+{ "view": "issues", "action": "open", "row": { "id": "SOP-123", "text": "…" } }
+```
+
+`row` is the selected (filtered) row; on a rows view an action without a
+selectable row is a silent no-op, on a body view `row` is null. The reply
+is the `action.invoke` shape — `{ "status": "opened SOP-123", "refresh":
+true }` — except that `refresh` re-renders the VIEW, not the mission list.
+`"interactive": true` actions own the real terminal with the envelope in
+`$HOUSTON_EVENT_FILE`, exit code as the only protocol, exactly like
+interactive missions actions.
+
 ### `launch.before`
 
 Modules with a `preLaunch` handler run **interactively, before claude gets
@@ -499,10 +544,12 @@ modules, not a sandbox (see below). Per surface:
 | Failure | Effect |
 |---|---|
 | explicit action fails | footer: `[name] <action>: <err> (see houston module log)` |
+| view render fails | visible view falls back to Missions with the footer notice; a background tab keeps its state unloaded and retries on the next activation |
+| view action (`view.invoke`) fails | footer notice like an explicit action; a failed action never triggers its refresh |
 | transform/preview fails | that module's contribution dropped (transform: previous patches kept ≤ 3 consecutive failures); other modules unaffected; footer warning once per module per session |
 | segment fails | last good text kept ≤ 10 min, then the segment disappears; never an error in the line |
 | broken manifest / wrong `api` / missing dir | module skipped at load with one startup warning; `ls`/doctor show the reason |
-| key shadowed | action dropped, warned in `ls`/doctor |
+| key shadowed | action or view dropped (a shadowed tab view loses its tab), warned in `ls`/doctor |
 
 Every failed exec appends a stanza to `<store>/logs/modules.log` — header
 plus up to 8 KiB of stderr tail. Read it with `houston module log`

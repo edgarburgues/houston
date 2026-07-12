@@ -30,12 +30,13 @@ var HoustonVersion = "dev"
 // Event names, one per surface. New surfaces get new names — the api version
 // only bumps for envelope/reply breaks.
 const (
-	EventAction    = "action.invoke"
-	EventTransform = "missions.transform"
-	EventPreview   = "preview.append"
-	EventSegment   = "statusline.segment"
-	EventPreLaunch = "launch.before"
-	EventView      = "view.render"
+	EventAction     = "action.invoke"
+	EventTransform  = "missions.transform"
+	EventPreview    = "preview.append"
+	EventSegment    = "statusline.segment"
+	EventPreLaunch  = "launch.before"
+	EventView       = "view.render"
+	EventViewInvoke = "view.invoke"
 )
 
 // Envelope is the single JSON object a handler receives on stdin (interactive
@@ -170,35 +171,100 @@ type ViewPayload struct {
 	View string `json:"view"`
 }
 
-type viewReply struct {
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	Notice string `json:"notice"`
+// ViewRow is one selectable line of a rows view: id is what view.invoke
+// hands back to the handler, text is what the user sees.
+type ViewRow struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
 }
 
-// maxViewBody bounds a rendered view; plenty for a readable page, small
-// enough that a runaway handler cannot balloon the TUI.
-const maxViewBody = 256 << 10
+// ViewInvokePayload is the view.invoke payload: which view, which of its
+// actions, and the selected row (nil on a body view).
+type ViewInvokePayload struct {
+	View   string   `json:"view"`
+	Action string   `json:"action"`
+	Row    *ViewRow `json:"row,omitempty"`
+}
+
+type viewReply struct {
+	Title  string    `json:"title"`
+	Body   string    `json:"body"`
+	Rows   []ViewRow `json:"rows"`
+	Notice string    `json:"notice"`
+}
+
+// View reply caps: a page bounded well under the reply cap, rows enough for
+// any human-scrollable list.
+const (
+	maxViewBody    = 256 << 10
+	maxViewRows    = 2000
+	maxViewRowText = 300
+)
 
 // RunView renders one module view through the full Invoke hardening. The
-// reply title (cleaned, <= 60 runes) falls back to the manifest title; the
-// body is plain text (ANSI/control stripped, newlines kept).
-func RunView(ctx context.Context, m Module, v View) (string, string, error) {
+// reply title (cleaned, <= 60 runes) falls back to the manifest title. A
+// reply with rows becomes an interactive list (each row one sanitized line;
+// the body is dropped); otherwise the body is the page, plain text with
+// newlines kept.
+func RunView(ctx context.Context, m Module, v View) (string, string, []ViewRow, error) {
 	env := NewEnvelope(EventView, m, ViewPayload{View: v.ID})
 	raw, err := Invoke(ctx, m, v.Command, env, CapReply, m.Manifest.ResolveTimeout(SurfaceView, v.TimeoutMs))
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	var rep viewReply
 	if err := DecodeReply(raw, &rep); err != nil {
 		LogEvent(m.Name, EventView, err.Error(), nil)
-		return "", "", err
+		return "", "", nil, err
 	}
 	title := CleanLine(rep.Title, 60)
 	if title == "" {
 		title = v.Title
 	}
-	return title, cleanBody(rep.Body, maxViewBody), nil
+	var rows []ViewRow
+	for i, r := range rep.Rows {
+		if i >= maxViewRows {
+			break
+		}
+		row := ViewRow{ID: CleanLine(r.ID, 128), Text: CleanLine(r.Text, maxViewRowText)}
+		if row.ID == "" && row.Text == "" {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) > 0 {
+		return title, "", rows, nil
+	}
+	return title, cleanBody(rep.Body, maxViewBody), nil, nil
+}
+
+// RunViewAction execs one non-interactive view action against the view's
+// OWN command (the manifest declares no per-action argv — the handler
+// dispatches on the event), with the action surface's timeout policy. Reply
+// semantics match action.invoke; Refresh re-renders the view, not the
+// mission list.
+func RunViewAction(ctx context.Context, m Module, v View, va ViewAction, env Envelope) (ActionReply, error) {
+	raw, err := Invoke(ctx, m, v.Command, env, CapReply, m.Manifest.ResolveTimeout(SurfaceAction, va.TimeoutMs))
+	if err != nil {
+		return ActionReply{}, err
+	}
+	var w actionReplyWire
+	if err := DecodeReply(raw, &w); err != nil {
+		LogEvent(m.Name, EventViewInvoke, err.Error(), nil)
+		return ActionReply{}, err
+	}
+	status := CleanLine(w.Status, 120)
+	if status == "" {
+		status = CleanLine(w.Notice, 120)
+	}
+	return ActionReply{Status: status, Refresh: w.Refresh || va.RefreshAfter}, nil
+}
+
+// ExecViewAction builds the plain *exec.Cmd for an interactive view action:
+// the view's command with the envelope in $HOUSTON_EVENT_FILE, real
+// terminal, no timeout — exactly the interactive-action shape.
+func ExecViewAction(m Module, v View, env Envelope) (*exec.Cmd, func(), error) {
+	return execInteractive(m, v.Command, env)
 }
 
 // PreLaunchMods filters the modules that declare a pre-launch hook,

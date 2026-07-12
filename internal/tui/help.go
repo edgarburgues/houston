@@ -81,7 +81,10 @@ func helpSections(reg []command, screen string) []helpSection {
 // title chrome, for very short terminals). Shared by the renderer and the
 // scroll clamp so both always agree on the scroll range.
 func (m Model) helpLines() ([]string, int, bool) {
-	secs := helpSections(m.registry, m.helpScreen())
+	// The visible view's page actions join the overlay for as long as that
+	// view is on screen — they are page-scoped, so the static registry
+	// cannot carry them.
+	secs := helpSections(append(append([]command{}, m.registry...), m.viewActionCommands()...), m.helpScreen())
 	labelW := 0
 	for _, s := range secs {
 		for _, c := range s.rows {

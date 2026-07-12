@@ -157,6 +157,30 @@ func TestHelperProcess(t *testing.T) {
 	case "view":
 		io.Copy(io.Discard, os.Stdin)
 		fmt.Print(`{"title":"My Page","body":"line1\nline2 with \u001b[31mansi\u001b[0m"}`)
+	case "view-rows":
+		io.Copy(io.Discard, os.Stdin)
+		fmt.Print(`{"title":"Rows (2)","body":"ignored when rows exist","rows":[{"id":"r1","text":"first \u001b[31mrow\u001b[0m"},{"id":"r2","text":"second"},{"id":"","text":""}]}`)
+	case "view-invoke":
+		// Echoes the payload back so tests can assert the wire shape.
+		b, _ := io.ReadAll(os.Stdin)
+		var env struct {
+			Payload struct {
+				View   string `json:"view"`
+				Action string `json:"action"`
+				Row    *struct {
+					ID string `json:"id"`
+				} `json:"row"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal(b, &env); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		row := "(none)"
+		if env.Payload.Row != nil {
+			row = env.Payload.Row.ID
+		}
+		fmt.Printf(`{"status":"did %s on %s in %s","refresh":true}`, env.Payload.Action, row, env.Payload.View)
 	case "seg-sleep":
 		ms, _ := strconv.Atoi(extra[0])
 		io.Copy(io.Discard, os.Stdin)

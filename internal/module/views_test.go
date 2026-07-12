@@ -21,6 +21,11 @@ func TestManifestViewValidation(t *testing.T) {
 		{"ctrl alias", `"views":[{"id":"v","key":"ctrl+i","title":"t","command":["x"]}]`, "can never fire"},
 		{"absolute command", `"views":[{"id":"v","key":"I","title":"t","command":["C:\\evil.exe"]}]`, "inside the module directory"},
 		{"no title", `"views":[{"id":"v","key":"I","title":"","command":["x"]}]`, "title"},
+		{"action enter ok", `"views":[{"id":"v","key":"I","title":"t","command":["x"],"actions":[{"id":"open","key":"enter","title":"open"}]}]`, ""},
+		{"action ctrl alias", `"views":[{"id":"v","key":"I","title":"t","command":["x"],"actions":[{"id":"a","key":"ctrl+m","title":"t"}]}]`, "can never fire"},
+		{"action dup key", `"views":[{"id":"v","key":"I","title":"t","command":["x"],"actions":[{"id":"a","key":"c","title":"t"},{"id":"b","key":"c","title":"t"}]}]`, "duplicate key"},
+		{"action bad id", `"views":[{"id":"v","key":"I","title":"t","command":["x"],"actions":[{"id":"Bad Id","key":"c","title":"t"}]}]`, "invalid id"},
+		{"action no title", `"views":[{"id":"v","key":"I","title":"t","command":["x"],"actions":[{"id":"a","key":"c","title":""}]}]`, "title"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -43,12 +48,15 @@ func TestRunView(t *testing.T) {
 	m := testModule(t, "viewer")
 	v := View{ID: "page", Key: "I", Title: "Fallback", Command: helperCmd("view")}
 	m.Manifest.Views = []View{v}
-	title, body, err := RunView(context.Background(), m, v)
+	title, body, rows, err := RunView(context.Background(), m, v)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if title != "My Page" {
 		t.Fatalf("title: %q", title)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("a body view must not grow rows: %v", rows)
 	}
 	if !strings.Contains(body, "line1\nline2") {
 		t.Fatalf("body: %q", body)
@@ -57,4 +65,45 @@ func TestRunView(t *testing.T) {
 		t.Fatal("ANSI must be stripped from view bodies")
 	}
 	_ = time.Now
+}
+
+func TestRunViewRows(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	m := testModule(t, "lister")
+	v := View{ID: "list", Key: "I", Title: "Fallback", Command: helperCmd("view-rows")}
+	m.Manifest.Views = []View{v}
+	title, body, rows, err := RunView(context.Background(), m, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if title != "Rows (2)" {
+		t.Fatalf("title: %q", title)
+	}
+	if body != "" {
+		t.Fatalf("rows win over body, got body %q", body)
+	}
+	if len(rows) != 2 || rows[0].ID != "r1" || rows[1].Text != "second" {
+		t.Fatalf("rows: %+v", rows)
+	}
+	if strings.Contains(rows[0].Text, "\x1b") {
+		t.Fatal("ANSI must be stripped from row text")
+	}
+}
+
+func TestRunViewAction(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	m := testModule(t, "lister")
+	v := View{ID: "list", Key: "I", Title: "L", Command: helperCmd("view-invoke")}
+	va := ViewAction{ID: "open", Key: "enter", Title: "open"}
+	env := NewEnvelope(EventViewInvoke, m, ViewInvokePayload{View: v.ID, Action: va.ID, Row: &ViewRow{ID: "SOP-7", Text: "x"}})
+	rep, err := RunViewAction(context.Background(), m, v, va, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Status != "did open on SOP-7 in list" {
+		t.Fatalf("the handler must see view, action and row: %q", rep.Status)
+	}
+	if !rep.Refresh {
+		t.Fatal("reply refresh must survive")
+	}
 }

@@ -54,6 +54,7 @@ const (
 	actRemapCwd
 	actAddProgram
 	actNewProgram
+	actViewFilter
 )
 
 type leftKind int
@@ -202,17 +203,9 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 	if hasTransforms(mods) {
 		m.initXform = transformCmd(ctx, mods, m.xformGen, module.ProjectRows(m.missions, st))
 	}
-	refs, accepted, actionWarns := buildModActions(mods)
+	refs, accepted, vrefs, vaccepted, actionWarns := buildModContribs(mods)
 	m.modActions = refs
-	actionKeys := map[string]bool{}
-	for id := range refs {
-		if k, ok := strings.CutPrefix(id, "missions:"); ok {
-			actionKeys[k] = true
-		}
-	}
-	vrefs, vaccepted, viewWarns := buildModViews(mods, actionKeys)
 	m.modViews = vrefs
-	actionWarns = append(actionWarns, viewWarns...)
 	// The command registry: core bindings plus the surviving module actions
 	// and views. The ? overlay and the footer hints render from it, so a
 	// dropped contribution can never be advertised.
@@ -552,6 +545,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case modViewMsg:
 		return m.onModViewMsg(msg)
+
+	case viewActMsg:
+		return m.onViewActMsg(msg)
 
 	case accProbeMsg:
 		m.accProbes = map[string]usage.Probe{}
@@ -986,6 +982,13 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.query = m.input.Value()
 		m.rebuildMid()
 		m.updatePreview()
+	}
+	if m.act == actViewFilter {
+		// Rows-view filter applies live, like search; the cursor snaps back
+		// to the best (first) match when the visible set changes.
+		st := m.ensureViewState(m.mvRef)
+		st.filter = m.input.Value()
+		st.cur = 0
 	}
 	return m, cmd
 }

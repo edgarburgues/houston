@@ -137,7 +137,7 @@ func TestShadowedKeysAuditsViews(t *testing.T) {
 	}
 	for _, want := range []string{
 		`bbb: tab view "digit" key "1" is shadowed by a built-in key`,
-		`bbb: view "vsact" key "Y" is shadowed by module aaa's action`,
+		`bbb: view "vsact" key "Y" is shadowed by module aaa`,
 		`ccc: view "dup" key "I" is shadowed by module bbb`,
 	} {
 		found := false

@@ -106,17 +106,18 @@ func newModelMods(t *testing.T, mods ...module.Module) Model {
 	return drive(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 }
 
-func TestBuildModActionsConflicts(t *testing.T) {
+func TestBuildModContribsActionConflicts(t *testing.T) {
 	amod := modWith("aaa",
 		module.Action{ID: "wins", Key: "J", Title: "wins", Screen: "missions"},
 	)
 	bmod := modWith("bbb",
 		module.Action{ID: "dropped-builtin", Key: "r", Title: "clashes with reindex", Screen: "missions"},
+		module.Action{ID: "dropped-tabkey", Key: "1", Title: "clashes with tab switch", Screen: "missions"},
 		module.Action{ID: "dropped-reserved", Key: "x", Title: "clashes with remove", Screen: "missions"},
 		module.Action{ID: "dropped-shadowed", Key: "J", Title: "loses to aaa", Screen: "missions"},
 		module.Action{ID: "ok", Key: "J", Title: "distinct screen is fine", Screen: "accounts"},
 	)
-	refs, accepted, warns := buildModActions([]module.Module{amod, bmod})
+	refs, accepted, _, _, warns := buildModContribs([]module.Module{amod, bmod})
 	if len(refs) != 2 || len(accepted) != 2 {
 		t.Fatalf("want 2 surviving actions, got refs=%d accepted=%d (warns=%v)", len(refs), len(accepted), warns)
 	}
@@ -126,8 +127,8 @@ func TestBuildModActionsConflicts(t *testing.T) {
 	if got := refs["accounts:J"]; got.mod.Name != "bbb" || got.act.ID != "ok" {
 		t.Errorf("accounts:J should belong to bbb/ok, got %s/%s", got.mod.Name, got.act.ID)
 	}
-	if len(warns) != 3 {
-		t.Fatalf("want 3 drop warnings, got %v", warns)
+	if len(warns) != 4 {
+		t.Fatalf("want 4 drop warnings, got %v", warns)
 	}
 	for _, w := range warns {
 		if !strings.Contains(w, "[bbb]") || !strings.Contains(w, "dropped") {

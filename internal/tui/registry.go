@@ -96,6 +96,7 @@ func coreCommands() []command {
 		{keys: []string{"pgup", "b"}, label: "pgup/b", title: "half page up", screen: scrModView, category: "Navigate"},
 		{keys: []string{"pgdown", "f", " "}, label: "pgdn/f", title: "half page down", screen: scrModView, category: "Navigate"},
 		{keys: []string{"g", "G"}, label: "g/G", title: "top / bottom", screen: scrModView, category: "Navigate"},
+		{keys: []string{"/"}, label: "/", title: "filter rows", screen: scrModView, category: "Navigate"},
 		{keys: []string{"r"}, label: "r", title: "refresh", screen: scrModView, category: "System", hint: true},
 		{keys: []string{"esc", "backspace"}, label: "esc", title: "back", screen: scrModView, category: "System", hint: true},
 		{keys: []string{"?"}, label: "?", title: "help", screen: scrModView, category: "System", hint: true},

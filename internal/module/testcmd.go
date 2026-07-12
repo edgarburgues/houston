@@ -113,6 +113,13 @@ func RunTest(name string, opts TestOpts) int {
 				m.Manifest.ResolveTimeout(SurfaceView, v.TimeoutMs), CapReply, nil))
 		}
 	}
+	if event == "" || event == EventViewInvoke {
+		for _, v := range m.Manifest.Views {
+			for _, va := range v.Actions {
+				record(runViewActionTest(w, m, v, va))
+			}
+		}
+	}
 	if h := m.Manifest.PreLaunch; h != nil && (event == "" || event == EventPreLaunch) {
 		// Shaped like a resume launch (mission only), with the documented
 		// harness marker so hooks can tell a test run apart.
@@ -154,8 +161,10 @@ func canonicalEvent(e string) (string, error) {
 		return EventPreLaunch, nil
 	case EventView, "view", "views":
 		return EventView, nil
+	case EventViewInvoke, "invoke":
+		return EventViewInvoke, nil
 	}
-	return "", fmt.Errorf("unknown event %q (want action.invoke, missions.transform, preview.append, statusline.segment or launch.before)", e)
+	return "", fmt.Errorf("unknown event %q (want action.invoke, missions.transform, preview.append, statusline.segment, launch.before, view.render or view.invoke)", e)
 }
 
 // loadForTest loads a module straight from its directory. No registry lookup
@@ -324,14 +333,41 @@ func runInteractiveTest(w io.Writer, m Module, a Action, label string, payload a
 	fmt.Fprintf(w, "\n=== %s → %s (interactive)\n", label, EventAction)
 	env := NewEnvelope(EventAction, m, payload)
 	printEnvelope(w, env)
-	cmd, cleanup, err := ExecAction(m, a, env)
+	return runInteractiveExec(w, a.Command, m.Dir, func() (*exec.Cmd, func(), error) {
+		return ExecAction(m, a, env)
+	})
+}
+
+// runViewActionTest runs one view page action: a canned row stands in for
+// the user's selection; non-interactive runs go through Invoke like the real
+// dispatch, interactive ones own this terminal.
+func runViewActionTest(w io.Writer, m Module, v View, va ViewAction) bool {
+	row := &ViewRow{ID: "TEST-1", Text: "TEST-1  fixture row"}
+	payload := ViewInvokePayload{View: v.ID, Action: va.ID, Row: row}
+	label := fmt.Sprintf("view %s action %s (key %s)", v.ID, va.ID, va.Key)
+	if va.Interactive {
+		fmt.Fprintf(w, "\n=== %s → %s (interactive)\n", label, EventViewInvoke)
+		env := NewEnvelope(EventViewInvoke, m, payload)
+		printEnvelope(w, env)
+		return runInteractiveExec(w, v.Command, m.Dir, func() (*exec.Cmd, func(), error) {
+			return ExecViewAction(m, v, env)
+		})
+	}
+	return runHandlerTest(w, m, label, EventViewInvoke, v.Command, payload,
+		m.Manifest.ResolveTimeout(SurfaceAction, va.TimeoutMs), CapReply, nil)
+}
+
+// runInteractiveExec is the shared terminal-owning runner for interactive
+// tests: real stdio, no timeout, exit 0 is the pass.
+func runInteractiveExec(w io.Writer, argv []string, dir string, build func() (*exec.Cmd, func(), error)) bool {
+	cmd, cleanup, err := build()
 	if err != nil {
 		fmt.Fprintf(w, "verdict:\n  ✗ %v\n", err)
 		return false
 	}
 	defer cleanup()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	fmt.Fprintf(w, "exec: %s (cwd %s, envelope in $HOUSTON_EVENT_FILE, no timeout — the handler owns the terminal)\n", strings.Join(a.Command, " "), m.Dir)
+	fmt.Fprintf(w, "exec: %s (cwd %s, envelope in $HOUSTON_EVENT_FILE, no timeout — the handler owns the terminal)\n", strings.Join(argv, " "), dir)
 	start := time.Now()
 	runErr := cmd.Run()
 	wall := time.Since(start).Round(time.Millisecond)
@@ -339,7 +375,7 @@ func runInteractiveTest(w io.Writer, m Module, a Action, label string, payload a
 		fmt.Fprintf(w, "verdict:\n  ✗ %v\n", runErr)
 	} else {
 		fmt.Fprintln(w, "verdict:")
-		fmt.Fprintln(w, "  ✓ exit 0 (interactive actions have no reply protocol)")
+		fmt.Fprintln(w, "  ✓ exit 0 (interactive runs have no reply protocol)")
 	}
 	fmt.Fprintf(w, "wall time: %s (no timeout)\n", wall)
 	return runErr == nil
@@ -445,10 +481,12 @@ func (v verdict) String() string {
 // replyFields are the known reply fields per event; anything else is noted
 // as ignored.
 var replyFields = map[string]map[string]bool{
-	EventAction:    {"status": true, "refresh": true, "notice": true},
-	EventTransform: {"patches": true, "notice": true},
-	EventPreview:   {"sections": true, "notice": true},
-	EventSegment:   {"text": true, "notice": true},
+	EventAction:     {"status": true, "refresh": true, "notice": true},
+	EventTransform:  {"patches": true, "notice": true},
+	EventPreview:    {"sections": true, "notice": true},
+	EventSegment:    {"text": true, "notice": true},
+	EventView:       {"title": true, "body": true, "rows": true, "notice": true},
+	EventViewInvoke: {"status": true, "refresh": true, "notice": true},
 }
 
 var (
@@ -475,10 +513,12 @@ func verdictReply(event string, raw []byte, knownKeys map[string]bool) []verdict
 		out, err = transformVerdicts(raw, knownKeys)
 	case EventPreview:
 		out, err = previewVerdicts(raw)
-	case EventAction:
+	case EventAction, EventViewInvoke:
 		out, err = actionVerdicts(raw)
 	case EventSegment:
 		out, err = segmentVerdicts(raw)
+	case EventView:
+		out, err = viewVerdicts(raw)
 	}
 	if err != nil {
 		// A wrong-typed known field: the real surface drops the whole reply.
@@ -590,6 +630,33 @@ func actionVerdicts(raw []byte) ([]verdict, error) {
 	return out, nil
 }
 
+func viewVerdicts(raw []byte) ([]verdict, error) {
+	var rep viewReply
+	if err := DecodeReply(raw, &rep); err != nil {
+		return nil, err
+	}
+	var out []verdict
+	if rep.Title == "" {
+		out = append(out, verdict{vOK, "title: empty — the manifest title is used"})
+	} else {
+		out = append(out, clipVerdict("title", rep.Title, 60))
+	}
+	if n := len(rep.Rows); n > 0 {
+		lvl := vOK
+		txt := fmt.Sprintf("rows: %d (cap %d) — interactive list; Houston owns cursor, scroll and / filter", n, maxViewRows)
+		if n > maxViewRows {
+			lvl, txt = vNote, fmt.Sprintf("rows: %d — only the first %d are kept", n, maxViewRows)
+		}
+		out = append(out, verdict{lvl, txt})
+		if rep.Body != "" {
+			out = append(out, verdict{vNote, "body: ignored because rows are present"})
+		}
+	} else {
+		out = append(out, verdict{vOK, fmt.Sprintf("body: %d bytes (cap %d) — read-only page", len(rep.Body), maxViewBody)})
+	}
+	return out, nil
+}
+
 func segmentVerdicts(raw []byte) ([]verdict, error) {
 	var rep segmentReply
 	if err := DecodeReply(raw, &rep); err != nil {
@@ -651,10 +718,10 @@ func noticeVerdict(event string, top map[string]json.RawMessage) []verdict {
 	if !present {
 		return nil
 	}
-	if event == EventSegment {
+	if event == EventSegment || event == EventView {
 		return []verdict{{vNote, "notice: ignored on this surface"}}
 	}
-	if event == EventAction {
+	if event == EventAction || event == EventViewInvoke {
 		if _, hasStatus := top["status"]; hasStatus {
 			return []verdict{{vNote, "notice: unused when status is set (status wins the footer)"}}
 		}

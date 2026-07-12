@@ -142,18 +142,35 @@ func (s Segment) TTL() time.Duration {
 	return time.Duration(t) * time.Second
 }
 
-// View is a module-contributed full-screen read-only page, opened from the
-// missions screen by its key. The handler renders on demand (view.render)
-// and on the r refresh key; plain text only, scrolled by Houston. Tab
-// promotes the view to a persistent TUI tab (digit keys / [ ] cycling);
+// View is a module-contributed full-screen page, opened from the missions
+// screen by its key. The handler renders on demand (view.render) and on the
+// r refresh key; plain text only, scrolled by Houston — or, when the reply
+// carries rows, an interactive list where Houston owns cursor, scroll and
+// the local / filter and the handler runs ONLY for Actions (view.invoke).
+// Tab promotes the view to a persistent TUI tab (digit keys / [ ] cycling);
 // its key then jumps to the tab instead of opening a transient page.
 type View struct {
-	ID        string   `json:"id"`
-	Key       string   `json:"key"`
-	Title     string   `json:"title"`
-	Command   []string `json:"command"`
-	TimeoutMs int      `json:"timeoutMs"`
-	Tab       bool     `json:"tab"`
+	ID        string       `json:"id"`
+	Key       string       `json:"key"`
+	Title     string       `json:"title"`
+	Command   []string     `json:"command"`
+	TimeoutMs int          `json:"timeoutMs"`
+	Tab       bool         `json:"tab"`
+	Actions   []ViewAction `json:"actions"`
+}
+
+// ViewAction is a command available inside one view's page. Its key is
+// page-scoped (live only while the view is on screen) and dispatches the
+// view's OWN command with a view.invoke event carrying the selected row —
+// navigating a rows view never execs, actions do. "enter" is allowed here
+// (and only here) as the natural primary action of a list.
+type ViewAction struct {
+	ID           string `json:"id"`
+	Key          string `json:"key"`
+	Title        string `json:"title"`
+	Interactive  bool   `json:"interactive"`
+	RefreshAfter bool   `json:"refreshAfter"`
+	TimeoutMs    int    `json:"timeoutMs"`
 }
 
 // Surface identifies which per-surface timeout default and clamp applies to
@@ -317,6 +334,38 @@ func (m Manifest) validate() error {
 		}
 		if err := validateCommand(v.Command); err != nil {
 			return fmt.Errorf("%s: %v", where, err)
+		}
+		if len(v.Actions) > 8 {
+			return fmt.Errorf("%s: %d actions declared, max 8", where, len(v.Actions))
+		}
+		aids := map[string]bool{}
+		akeys := map[string]bool{}
+		for j, va := range v.Actions {
+			w2 := fmt.Sprintf("%s action[%d]", where, j)
+			if va.ID != "" {
+				w2 = fmt.Sprintf("%s action %q", where, va.ID)
+			}
+			if !nameCharset(va.ID) {
+				return fmt.Errorf("%s: invalid id (want ^[a-z0-9][a-z0-9._-]{0,63}$)", w2)
+			}
+			if aids[va.ID] {
+				return fmt.Errorf("%s: duplicate id", w2)
+			}
+			aids[va.ID] = true
+			// "enter" is legal here and only here: it is the natural primary
+			// action of a rows view, and nothing on the view screen owns it.
+			if va.Key != "enter" {
+				if err := validKey(va.Key); err != nil {
+					return fmt.Errorf("%s: %v", w2, err)
+				}
+			}
+			if akeys[va.Key] {
+				return fmt.Errorf("%s: duplicate key %q", w2, va.Key)
+			}
+			akeys[va.Key] = true
+			if va.Title == "" || utf8.RuneCountInString(va.Title) > 40 {
+				return fmt.Errorf("%s: title must be 1-40 runes", w2)
+			}
 		}
 	}
 	return nil
