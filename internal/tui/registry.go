@@ -19,6 +19,7 @@ const (
 	scrMissions = "missions"
 	scrAccounts = "accounts"
 	scrModView  = "modview"
+	scrNotices  = "notices"
 	scrGlobal   = "global"
 )
 
@@ -89,6 +90,16 @@ func coreCommands() []command {
 		{keys: []string{"esc", "A", "tab"}, label: "esc", title: "back to missions", screen: scrAccounts, category: "System"},
 		{keys: []string{"?"}, label: "?", title: "help", screen: scrAccounts, category: "System", hint: true},
 		{keys: []string{"q", "ctrl+c"}, label: "q", title: "quit", screen: scrAccounts, category: "System"},
+
+		// notices tab
+		{keys: []string{"up", "k"}, label: "↑/k", title: "scroll up", screen: scrNotices, category: "Navigate"},
+		{keys: []string{"down", "j"}, label: "↓/j", title: "scroll down", screen: scrNotices, category: "Navigate"},
+		{keys: []string{"pgup", "b"}, label: "pgup/b", title: "page up", screen: scrNotices, category: "Navigate"},
+		{keys: []string{"pgdown", "f", " "}, label: "pgdn/f", title: "page down", screen: scrNotices, category: "Navigate"},
+		{keys: []string{"g", "G"}, label: "g/G", title: "newest / oldest", screen: scrNotices, category: "Navigate"},
+		{keys: []string{"esc", "backspace"}, label: "esc", title: "back", screen: scrNotices, category: "System", hint: true},
+		{keys: []string{"?"}, label: "?", title: "help", screen: scrNotices, category: "System", hint: true},
+		{keys: []string{"q", "ctrl+c"}, label: "q", title: "quit", screen: scrNotices, category: "System"},
 
 		// full-screen module view
 		{keys: []string{"up", "k"}, label: "↑/k", title: "scroll up", screen: scrModView, category: "Navigate"},

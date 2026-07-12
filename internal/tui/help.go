@@ -21,6 +21,8 @@ func (m Model) helpScreen() string {
 	switch m.screen {
 	case screenAccounts:
 		return scrAccounts
+	case screenNotices:
+		return scrNotices
 	case screenModuleView:
 		return scrModView
 	default:
@@ -32,6 +34,7 @@ func (m Model) helpScreen() string {
 var helpScreenNames = map[string]string{
 	scrMissions: "Missions",
 	scrAccounts: "Accounts",
+	scrNotices:  "Notices",
 	scrModView:  "Module view",
 }
 

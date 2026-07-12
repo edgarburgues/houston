@@ -41,6 +41,7 @@ type screen int
 const (
 	screenMissions screen = iota
 	screenAccounts
+	screenNotices
 	screenModuleView
 )
 
@@ -109,6 +110,12 @@ type Model struct {
 	tabs   []tabRef
 	tabCur int
 	tabIdx map[string]int
+
+	// notices ring (notices.go): every outcome the footer ever showed, with
+	// the seen watermark for the strip counter and the tab's scroll offset.
+	notices     []notice
+	noticesSeen int
+	ntScroll    int
 
 	// modules
 	mods       []module.Module            // enabled, loaded once in New, immutable
@@ -214,11 +221,14 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 	m.tabs, m.tabIdx = buildTabs(vaccepted)
 	m.mvStates = map[string]*modViewState{}
 	if warns := append(append([]string{}, loadWarns...), actionWarns...); len(warns) > 0 {
-		// Skipped modules and dropped actions surface once at startup;
-		// ls/doctor show them too.
+		// Skipped modules and dropped actions surface at startup and stay
+		// in the Notices tab; ls/doctor show them too.
+		for _, w := range warns {
+			m.note(w)
+		}
 		m.status = warns[0]
 		if len(warns) > 1 {
-			m.status += fmt.Sprintf(" (+%d more)", len(warns)-1)
+			m.status += fmt.Sprintf(" (+%d more in Notices)", len(warns)-1)
 		}
 	}
 	return m
@@ -478,7 +488,7 @@ func (m *Model) selected() (model.Mission, bool) {
 // silently claiming success. Returns true if there was an error.
 func (m *Model) noteSaveErr(err error) bool {
 	if err != nil {
-		m.status = "couldn't save: " + err.Error()
+		m.note("couldn't save: " + err.Error())
 		return true
 	}
 	return false
@@ -517,9 +527,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case execDoneMsg:
 		if msg.err != nil {
-			m.status = "claude failed: " + msg.err.Error()
+			m.note("claude failed: " + msg.err.Error())
 		} else {
-			m.status = "back from claude"
+			m.note("back from claude")
 		}
 		// The session we just ran invalidated the accounts figures (last-use,
 		// pressure). Refresh what's visible now; mark the rest stale so the
@@ -566,11 +576,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// user asked for it explicitly.
 		switch {
 		case msg.err != nil:
-			m.status = actionFailStatus(msg.mod, msg.id, msg.err)
+			m.note(actionFailStatus(msg.mod, msg.id, msg.err))
 		case msg.status != "":
-			m.status = "[" + msg.mod + "] " + msg.status
+			m.note("[" + msg.mod + "] " + msg.status)
 		default:
-			m.status = "[" + msg.mod + "] " + msg.id + " done"
+			m.note("[" + msg.mod + "] " + msg.id + " done")
 		}
 		return m, cmd
 
@@ -621,6 +631,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == screenAccounts {
 			return m.updateAccountsKeys(msg)
+		}
+		if m.screen == screenNotices {
+			return m.updateNoticesKeys(msg)
 		}
 		if m.screen == screenModuleView {
 			return m.updateModuleViewKeys(msg)
@@ -693,7 +706,7 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.pendingDelete = ""
 			if err := accounts.Remove(a.ID); err != nil {
-				m.status = "couldn't delete: " + err.Error()
+				m.note("couldn't delete: " + err.Error())
 				return m, nil
 			}
 			m.accs, _ = accounts.Load()
@@ -703,7 +716,7 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.accCur < 0 {
 				m.accCur = 0
 			}
-			m.status = "account removed: " + a.ID
+			m.note("account removed: " + a.ID)
 		}
 	case "enter":
 		if a, ok := m.curAccount(); ok {
@@ -711,7 +724,7 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if s := healLinks(); s != "" {
-				m.status = s
+				m.note(s)
 			}
 			cmd := launch.Cmd(a.ResolveConfigDir(), nil, "")
 			row := module.AccountRowOf(a)
@@ -773,11 +786,11 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if s := healLinks(); s != "" {
-				m.status = s
+				m.note(s)
 			}
 			cmd, err := resume.Command(ms)
 			if err != nil {
-				m.status = err.Error()
+				m.note(err.Error())
 				return m, nil
 			}
 			m.status = "launching claude --resume " + shortID(ms.ID, 8) + " …"
@@ -792,7 +805,7 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		if ms, ok := m.selected(); ok {
 			if !m.noteSaveErr(m.st.ToggleArchive(ms.Key())) {
-				m.status = "archived/unarchived"
+				m.note("archived/unarchived")
 			}
 			m.refresh()
 		}
@@ -821,7 +834,7 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if cur, ok := m.curLeft(); ok && cur.kind == lkProgram {
 			if ms, ok := m.selected(); ok {
 				if !m.noteSaveErr(m.st.RemoveFromProgram(cur.prog, ms.Key())) {
-					m.status = "removed from program " + cur.prog
+					m.note("removed from program " + cur.prog)
 				}
 				m.refresh()
 			}
@@ -830,9 +843,9 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if ms, ok := m.selected(); ok {
 			out := filepath.Join(store.Dir(), "exports", safeName(ms.Title, ms.ID)+".md")
 			if p, err := export.Mission(ms, out); err != nil {
-				m.status = "export failed: " + err.Error()
+				m.note("export failed: " + err.Error())
 			} else {
-				m.status = "exported → " + p
+				m.note("exported → " + p)
 			}
 		}
 	case "r":
@@ -886,14 +899,14 @@ func (m *Model) rescanNow() tea.Cmd {
 	}
 	ms, err := m.rescan()
 	if err != nil {
-		m.status = "reindex failed: " + err.Error()
+		m.note("reindex failed: " + err.Error())
 		return nil
 	}
 	m.adoptMissions(ms)
 	m.prevCache = map[string][]module.Section{}
 	m.lastPreviewKey = ""
 	m.refresh()
-	m.status = fmt.Sprintf("reindexed: %d missions", len(ms))
+	m.note(fmt.Sprintf("reindexed: %d missions", len(ms)))
 	return m.dispatchTransforms()
 }
 
@@ -936,7 +949,7 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if ok {
 				if val != "" {
 					if fi, err := os.Stat(val); err != nil || !fi.IsDir() {
-						m.status = "not a directory: " + val
+						m.note("not a directory: " + val)
 						m.refresh()
 						return m, nil
 					}
@@ -946,9 +959,9 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					// a cwd matters: resume, hooks, payloads, the cwd? marker.
 					cmd := m.rescanNow()
 					if val == "" {
-						m.status = "cwd override cleared"
+						m.note("cwd override cleared")
 					} else {
-						m.status = "cwd remapped: " + val
+						m.note("cwd remapped: " + val)
 					}
 					return m, cmd
 				}
@@ -963,13 +976,13 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					err = m.st.AddToProgram(val, ms.Key())
 				}
 				if !m.noteSaveErr(err) {
-					m.status = "added to " + val
+					m.note("added to " + val)
 				}
 			}
 		case actNewProgram:
 			if val != "" {
 				if !m.noteSaveErr(m.st.CreateProgram(val, "")) {
-					m.status = "program created: " + val
+					m.note("program created: " + val)
 				}
 			}
 		}
@@ -1136,6 +1149,9 @@ func (m Model) View() string {
 	}
 	if m.screen == screenAccounts {
 		return m.viewAccounts()
+	}
+	if m.screen == screenNotices {
+		return m.viewNotices()
 	}
 	if m.screen == screenModuleView {
 		return m.viewModuleView()

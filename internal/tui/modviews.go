@@ -224,7 +224,7 @@ func (m Model) onModViewMsg(msg modViewMsg) (tea.Model, tea.Cmd) {
 			m.screen = screenMissions
 			m.tabCur = 0
 		}
-		m.status = actionFailStatus(msg.mod, msg.id, msg.err)
+		m.note(actionFailStatus(msg.mod, msg.id, msg.err))
 		return m, nil
 	}
 	st.loaded = true
@@ -377,7 +377,7 @@ func (m Model) runViewAction(va module.ViewAction) (tea.Model, tea.Cmd) {
 	cmd, cleanup, err := module.ExecViewAction(ref.mod, ref.view, env)
 	if err != nil {
 		module.LogEvent(ref.mod.Name, module.EventViewInvoke, err.Error(), nil)
-		m.status = actionFailStatus(ref.mod.Name, va.ID, err)
+		m.note(actionFailStatus(ref.mod.Name, va.ID, err))
 		return m, nil
 	}
 	id, refresh := va.ID, va.RefreshAfter
@@ -414,11 +414,11 @@ func runViewActionCmd(ctx context.Context, ref moduleViewRef, va module.ViewActi
 func (m Model) onViewActMsg(msg viewActMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case msg.err != nil:
-		m.status = actionFailStatus(msg.ref.mod.Name, msg.id, msg.err)
+		m.note(actionFailStatus(msg.ref.mod.Name, msg.id, msg.err))
 	case msg.status != "":
-		m.status = "[" + msg.ref.mod.Name + "] " + msg.status
+		m.note("[" + msg.ref.mod.Name + "] " + msg.status)
 	default:
-		m.status = "[" + msg.ref.mod.Name + "] " + msg.id + " done"
+		m.note("[" + msg.ref.mod.Name + "] " + msg.id + " done")
 	}
 	if msg.err != nil || !msg.refresh {
 		return m, nil

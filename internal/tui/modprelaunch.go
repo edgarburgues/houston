@@ -87,7 +87,7 @@ func (m Model) runNextHook() (tea.Model, tea.Cmd) {
 		cmd, cleanup, err := module.ExecPreLaunch(mod, env)
 		if err != nil {
 			module.LogEvent(mod.Name, module.EventPreLaunch, err.Error(), nil)
-			m.status = "[" + mod.Name + "] preLaunch skipped: " + err.Error()
+			m.note("[" + mod.Name + "] preLaunch skipped: " + err.Error())
 			continue
 		}
 		name, gen := mod.Name, m.pending.gen
@@ -116,13 +116,13 @@ func (m Model) onHookDone(msg hookDoneMsg) (tea.Model, tea.Cmd) {
 		if errors.As(msg.err, &ee) {
 			// The hook ran and voted to cancel: its contract, not a failure.
 			m.pending = nil
-			m.status = "[" + msg.mod + "] launch cancelled (exit " + strconv.Itoa(ee.ExitCode()) + ")"
+			m.note("[" + msg.mod + "] launch cancelled (exit " + strconv.Itoa(ee.ExitCode()) + ")")
 			return m, nil
 		}
 		// Start failure (missing binary and kin): fail-open, like the CLI
 		// path and the build-failure branch above — skip and keep going.
 		module.LogEvent(msg.mod, module.EventPreLaunch, "interactive: "+msg.err.Error(), nil)
-		m.status = "[" + msg.mod + "] preLaunch skipped: " + msg.err.Error()
+		m.note("[" + msg.mod + "] preLaunch skipped: " + msg.err.Error())
 	}
 	return m.runNextHook()
 }

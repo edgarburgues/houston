@@ -40,6 +40,7 @@ func TestGoldenDefaultTheme(t *testing.T) {
 		{"missions-left-focus", []tea.Msg{key(tea.KeyTab)}},
 		{"missions-palette", []tea.Msg{runes(":")}},
 		{"accounts-empty", []tea.Msg{runes("A")}},
+		{"notices-empty", []tea.Msg{runes("3")}},
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {

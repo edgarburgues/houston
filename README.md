@@ -115,9 +115,15 @@ Shortcuts: `↑↓`/`jk` move · `tab`/`←→` pane · `/` search · `enter` **
 `*` pin · `a` archive · `t` tag · `n` note · `p`→program · `P` new · `x`
 remove · `e` export · **`A` accounts** · `r` reindex · `?` help · `q` quit.
 
+The TUI is a tab shell: `1 Missions · 2 Accounts · 3 Notices` plus one tab
+per promoted module view. Digits `1-9` jump, `[`/`]` cycle, from any screen.
+Notices keeps every outcome the one-line footer ever showed (errors,
+warnings, results) with timestamps and an unread counter in the strip.
+
 `?` opens a which-key overlay on every screen: all commands grouped by
 category, with one section per enabled module. Pressing a command key inside
-the overlay closes it and runs that command.
+the overlay closes it and runs that command. `:` (or `ctrl+p`) opens a
+command palette — fuzzy search over every command and tab, enter runs.
 
 **Resume** `cd`s into the correct directory (it even resolves names with
 ambiguous hyphens, dots or spaces) and launches `claude --resume` with the

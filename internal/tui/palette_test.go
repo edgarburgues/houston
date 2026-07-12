@@ -40,11 +40,11 @@ func TestPaletteTabJumpAndScoping(t *testing.T) {
 		m = drive(m, runes(string(r)))
 	}
 	matches := m.palMatches()
-	if len(matches) == 0 || matches[0].tab != 2 {
+	if len(matches) == 0 || matches[0].tab != 3 {
 		t.Fatalf("top match for 'tab iss' should be the jira tab entry: %+v", matches)
 	}
 	m = drive(m, key(tea.KeyEnter))
-	if m.tabCur != 2 || m.screen != screenModuleView {
+	if m.tabCur != 3 || m.screen != screenModuleView {
 		t.Fatalf("running a tab entry must switch: tab=%d screen=%v", m.tabCur, m.screen)
 	}
 	// Scoping: the accounts palette must not offer missions commands.

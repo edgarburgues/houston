@@ -23,6 +23,7 @@ type tabKind int
 const (
 	tabMissions tabKind = iota
 	tabAccounts
+	tabNotices
 	tabModView
 )
 
@@ -39,7 +40,11 @@ type tabRef struct {
 // index maps a view's state key to its tab so its missions key can jump to
 // the tab instead of opening a transient page.
 func buildTabs(views []moduleViewRef) ([]tabRef, map[string]int) {
-	tabs := []tabRef{{kind: tabMissions, title: "Missions"}, {kind: tabAccounts, title: "Accounts"}}
+	tabs := []tabRef{
+		{kind: tabMissions, title: "Missions"},
+		{kind: tabAccounts, title: "Accounts"},
+		{kind: tabNotices, title: "Notices"},
+	}
 	idx := map[string]int{}
 	for _, r := range views {
 		if !r.view.Tab {
@@ -134,6 +139,11 @@ func (m Model) switchTab(n int) (tea.Model, tea.Cmd) {
 				return m, probeAccountsCmd(m.accs)
 			}
 		}
+	case tabNotices:
+		m.screen = screenNotices
+		m.seedHint(scrNotices)
+		m.noticesSeen = len(m.notices)
+		m.ntScroll = 0
 	case tabModView:
 		m.screen = screenModuleView
 		m.mvRef = t.ref
@@ -143,10 +153,17 @@ func (m Model) switchTab(n int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// tabTitle is the strip label: fixed for core tabs, the last rendered title
-// for module tabs (so a handler's "My Jira issues (17)" counts live there).
+// tabTitle is the strip label: fixed for core tabs (Notices carries its
+// unread counter), the last rendered title for module tabs (so a handler's
+// "My Jira issues (17)" counts live there).
 func (m Model) tabTitle(i int) string {
 	t := m.tabs[i]
+	if t.kind == tabNotices {
+		if n := m.noticesUnread(); n > 0 {
+			return fmt.Sprintf("Notices (%d)", n)
+		}
+		return t.title
+	}
 	if t.kind != tabModView {
 		return t.title
 	}

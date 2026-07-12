@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -24,20 +25,20 @@ func tabModule(name string) module.Module {
 func TestTabsBuildAndSwitch(t *testing.T) {
 	t.Setenv("HOUSTON_HOME", t.TempDir())
 	m := newModelMods(t, tabModule("jira"))
-	if len(m.tabs) != 3 {
-		t.Fatalf("want Missions+Accounts+jira, got %d tabs", len(m.tabs))
+	if len(m.tabs) != 4 {
+		t.Fatalf("want Missions+Accounts+Notices+jira, got %d tabs", len(m.tabs))
 	}
 	if m.tabCur != 0 || m.screen != screenMissions {
 		t.Fatal("the TUI must start on the Missions tab")
 	}
 
 	// Digit jumps to the module tab and dispatches its first (and only) fetch.
-	tm, cmd := m.Update(runes("3"))
+	tm, cmd := m.Update(runes("4"))
 	m = tm.(Model)
-	if m.tabCur != 2 || m.screen != screenModuleView || cmd == nil {
+	if m.tabCur != 3 || m.screen != screenModuleView || cmd == nil {
 		t.Fatalf("digit switch failed: tab=%d screen=%v cmd=%v", m.tabCur, m.screen, cmd)
 	}
-	ref := m.tabs[2].ref
+	ref := m.tabs[3].ref
 
 	// The render lands while we hop away — content is stored, screen is not
 	// hijacked.
@@ -53,7 +54,7 @@ func TestTabsBuildAndSwitch(t *testing.T) {
 
 	// Returning reuses the retained render without a new fetch, and the tab
 	// strip shows the live title.
-	tm, cmd = m.Update(runes("3"))
+	tm, cmd = m.Update(runes("4"))
 	m = tm.(Model)
 	if cmd != nil {
 		t.Fatal("a loaded tab must not re-fetch on activation")
@@ -68,7 +69,7 @@ func TestTabsBuildAndSwitch(t *testing.T) {
 		t.Fatalf("] from the last tab should wrap to 0, got %d", m.tabCur)
 	}
 	m = drive(m, runes("["))
-	if m.tabCur != 2 {
+	if m.tabCur != 3 {
 		t.Fatalf("[ from the first tab should wrap to the last, got %d", m.tabCur)
 	}
 
@@ -91,7 +92,7 @@ func TestPromotedViewKeyJumpsToTab(t *testing.T) {
 	m := newModelMods(t, tabModule("jira"))
 	tm, cmd := m.Update(runes("I"))
 	m = tm.(Model)
-	if m.tabCur != 2 || m.screen != screenModuleView {
+	if m.tabCur != 3 || m.screen != screenModuleView {
 		t.Fatalf("the view key must jump to its tab: tab=%d screen=%v", m.tabCur, m.screen)
 	}
 	if cmd == nil {
@@ -183,7 +184,7 @@ func TestTabBarRendersOnCoreScreens(t *testing.T) {
 	t.Setenv("HOUSTON_HOME", t.TempDir())
 	m := newModel(t)
 	view := m.View()
-	for _, want := range []string{"1 Missions", "2 Accounts", "3 missions · 0 programs"} {
+	for _, want := range []string{"1 Missions", "2 Accounts", "3 Notices", "3 missions · 0 programs"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("missions frame should carry %q", want)
 		}
@@ -191,5 +192,56 @@ func TestTabBarRendersOnCoreScreens(t *testing.T) {
 	view = drive(m, runes("2")).View()
 	if !strings.Contains(view, "0 accounts") {
 		t.Errorf("accounts frame should carry the account count")
+	}
+}
+
+func TestNoticesRingAndTab(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	m := newModel(t)
+	// Outcomes ring; consecutive duplicates collapse.
+	m.note("export failed: boom")
+	m.note("export failed: boom")
+	m.note("reindexed: 3 missions")
+	if got := m.noticesStrings(); len(got) != 2 || got[0] != "export failed: boom" {
+		t.Fatalf("ring: %v", got)
+	}
+	if m.noticesUnread() != 2 {
+		t.Fatalf("unread: %d", m.noticesUnread())
+	}
+	if !strings.Contains(m.View(), "Notices (2)") {
+		t.Fatal("the strip should carry the unread counter")
+	}
+	// Activating the tab shows the history newest first and clears the counter.
+	m = drive(m, runes("3"))
+	if m.screen != screenNotices || m.noticesUnread() != 0 {
+		t.Fatalf("activation must clear unread: screen=%v unread=%d", m.screen, m.noticesUnread())
+	}
+	view := m.View()
+	if !strings.Contains(view, "reindexed: 3 missions") || !strings.Contains(view, "export failed: boom") {
+		t.Fatal("the tab should list the ring")
+	}
+	if strings.Contains(view, "Notices (") {
+		t.Fatal("the strip counter must reset after activation")
+	}
+	// esc goes home; a new outcome re-arms the counter.
+	m = drive(m, key(tea.KeyEsc))
+	m.note("claude failed: exit 1")
+	if m.tabCur != 0 || m.noticesUnread() != 1 {
+		t.Fatalf("tab=%d unread=%d", m.tabCur, m.noticesUnread())
+	}
+}
+
+func TestNoticesRingTrims(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	m := newModel(t)
+	for i := 0; i < noticesMax+25; i++ {
+		m.note(fmt.Sprintf("event %d", i))
+	}
+	got := m.noticesStrings()
+	if len(got) != noticesMax {
+		t.Fatalf("ring must trim to %d, got %d", noticesMax, len(got))
+	}
+	if got[0] != "event 25" {
+		t.Fatalf("oldest entries must fall off first, got %q", got[0])
 	}
 }

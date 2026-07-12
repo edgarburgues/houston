@@ -175,7 +175,7 @@ func (m *Model) noteModWarnings(warns []string) {
 			continue
 		}
 		m.warned[key] = true
-		m.status = w
+		m.note(w)
 	}
 }
 

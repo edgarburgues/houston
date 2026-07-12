@@ -88,7 +88,7 @@ func (m Model) runModuleAction(ref moduleActionRef) (tea.Model, tea.Cmd) {
 	cmd, cleanup, err := module.ExecAction(ref.mod, ref.act, env)
 	if err != nil {
 		module.LogEvent(ref.mod.Name, module.EventAction, err.Error(), nil)
-		m.status = actionFailStatus(ref.mod.Name, ref.act.ID, err)
+		m.note(actionFailStatus(ref.mod.Name, ref.act.ID, err))
 		return m, nil
 	}
 	name, id, refresh := ref.mod.Name, ref.act.ID, ref.act.RefreshAfter
