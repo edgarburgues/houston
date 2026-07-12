@@ -70,6 +70,7 @@ func TestBuiltinKeyTablesMatchSwitches(t *testing.T) {
 		{"app.go", "updateKeys", builtinKeyTable(scrMissions)},
 		{"app.go", "updateAccountsKeys", builtinKeyTable(scrAccounts)},
 		{"modviews.go", "updateModuleViewKeys", builtinKeyTable(scrModView)},
+		{"notices.go", "updateNoticesKeys", builtinKeyTable(scrNotices)},
 		{"tabs.go", "updateGlobalKeys", builtinKeyTable(scrGlobal)},
 	}
 	for _, tt := range tests {
