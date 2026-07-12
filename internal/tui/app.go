@@ -335,6 +335,33 @@ func clip(s string, w int) string {
 	return string(r[:w-1]) + "…"
 }
 
+// clipCells clips by DISPLAY CELLS, not runes: a CJK/emoji rune occupies two
+// columns and a rune-budgeted clip would let module-controlled text (view
+// rows) wrap inside its pane and push the frame past the terminal height.
+func clipCells(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	s = strings.ReplaceAll(s, "\t", " ")
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	if w == 1 {
+		return "…"
+	}
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if used+rw > w-1 {
+			break
+		}
+		b.WriteRune(r)
+		used += rw
+	}
+	return b.String() + "…"
+}
+
 // shortID safely truncates an id to n bytes. Mission ids aren't guaranteed to be
 // 36-char UUIDs (a short legacy/hand-copied filename like "ab.jsonl" yields a
 // 2-char id), so a naive id[:n] would panic and take down the whole TUI.

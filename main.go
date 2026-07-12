@@ -856,6 +856,14 @@ func shadowedKeys(mods []module.Module) []string {
 				continue
 			}
 			claimed[k] = m.Name
+			// Page actions are pruned by the TUI against the view page's own
+			// keys — mirror that here or doctor gives a false all-clear on a
+			// dead binding.
+			for _, va := range v.Actions {
+				if tui.BuiltinViewPageKeys[va.Key] {
+					out = append(out, fmt.Sprintf("%s: view %q action %q key %q is shadowed by a built-in view-page key", m.Name, v.ID, va.ID, va.Key))
+				}
+			}
 		}
 	}
 	return out

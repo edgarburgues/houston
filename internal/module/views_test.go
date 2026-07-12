@@ -2,6 +2,7 @@ package module
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -105,5 +106,36 @@ func TestRunViewAction(t *testing.T) {
 	}
 	if !rep.Refresh {
 		t.Fatal("reply refresh must survive")
+	}
+}
+
+func TestViewInvokeRowIsExplicitNull(t *testing.T) {
+	b, err := json.Marshal(ViewInvokePayload{View: "v", Action: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"row":null`) {
+		t.Fatalf("a body view must send an explicit null row, got %s", b)
+	}
+}
+
+func TestViewVerdictsGradeSanitizedRows(t *testing.T) {
+	reply, err := json.Marshal(map[string]any{
+		"rows": []map[string]string{{"id": "", "text": string(rune(27)) + "[31m"}},
+		"body": "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := viewVerdicts(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, v := range out {
+		joined += v.Text + "\n"
+	}
+	if !strings.Contains(joined, "NONE survive") || !strings.Contains(joined, "read-only page") {
+		t.Fatalf("all-dead rows must be graded as the body page: %s", joined)
 	}
 }

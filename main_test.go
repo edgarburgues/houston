@@ -123,7 +123,10 @@ func TestShadowedKeysAuditsViews(t *testing.T) {
 			Views: []module.View{
 				{ID: "digit", Key: "1", Title: "t", Tab: true}, // built-in tab key
 				{ID: "vsact", Key: "Y", Title: "t"},            // any module's action wins
-				{ID: "ok", Key: "I", Title: "t"},               // survives
+				{ID: "ok", Key: "I", Title: "t", Actions: []module.ViewAction{
+					{ID: "dead", Key: "g", Title: "t"}, // page built-in: pruned by the TUI
+					{ID: "live", Key: "o", Title: "t"},
+				}}, // survives
 			},
 		}},
 		{Entry: module.Entry{Name: "ccc", Enabled: true}, Manifest: module.Manifest{
@@ -132,12 +135,13 @@ func TestShadowedKeysAuditsViews(t *testing.T) {
 		}},
 	}
 	warns := shadowedKeys(mods)
-	if len(warns) != 3 {
-		t.Fatalf("want 3 view warnings, got %d: %v", len(warns), warns)
+	if len(warns) != 4 {
+		t.Fatalf("want 4 view warnings, got %d: %v", len(warns), warns)
 	}
 	for _, want := range []string{
 		`bbb: tab view "digit" key "1" is shadowed by a built-in key`,
 		`bbb: view "vsact" key "Y" is shadowed by module aaa`,
+		`bbb: view "ok" action "dead" key "g" is shadowed by a built-in view-page key`,
 		`ccc: view "dup" key "I" is shadowed by module bbb`,
 	} {
 		found := false

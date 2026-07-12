@@ -641,17 +641,34 @@ func viewVerdicts(raw []byte) ([]verdict, error) {
 	} else {
 		out = append(out, clipVerdict("title", rep.Title, 60))
 	}
-	if n := len(rep.Rows); n > 0 {
+	// Grade the SANITIZED row count, like RunView: rows whose cleaned id and
+	// text are both empty are dropped, and a reply whose rows all die falls
+	// back to the body page — the verdict must name the mode the real
+	// surface uses.
+	surviving := 0
+	for i, r := range rep.Rows {
+		if i >= maxViewRows {
+			break
+		}
+		if CleanLine(r.ID, 128) != "" || CleanLine(r.Text, maxViewRowText) != "" {
+			surviving++
+		}
+	}
+	switch {
+	case surviving > 0:
+		txt := fmt.Sprintf("rows: %d (cap %d) — interactive list; Houston owns cursor, scroll and / filter", surviving, maxViewRows)
 		lvl := vOK
-		txt := fmt.Sprintf("rows: %d (cap %d) — interactive list; Houston owns cursor, scroll and / filter", n, maxViewRows)
-		if n > maxViewRows {
-			lvl, txt = vNote, fmt.Sprintf("rows: %d — only the first %d are kept", n, maxViewRows)
+		if surviving != len(rep.Rows) {
+			lvl, txt = vNote, fmt.Sprintf("rows: %d declared, %d survive sanitization — interactive list", len(rep.Rows), surviving)
 		}
 		out = append(out, verdict{lvl, txt})
 		if rep.Body != "" {
 			out = append(out, verdict{vNote, "body: ignored because rows are present"})
 		}
-	} else {
+	case len(rep.Rows) > 0:
+		out = append(out, verdict{vNote, fmt.Sprintf("rows: %d declared but NONE survive sanitization — the body page is used", len(rep.Rows))})
+		out = append(out, verdict{vOK, fmt.Sprintf("body: %d bytes (cap %d) — read-only page", len(rep.Body), maxViewBody)})
+	default:
 		out = append(out, verdict{vOK, fmt.Sprintf("body: %d bytes (cap %d) — read-only page", len(rep.Body), maxViewBody)})
 	}
 	return out, nil

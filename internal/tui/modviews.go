@@ -101,7 +101,7 @@ func buildModContribs(mods []module.Module) (map[string]moduleActionRef, []modul
 	var accViews []moduleViewRef
 	var warns []string
 	claimed := map[string]string{} // "screen:key" → owning module
-	pageKeys := unionKeys(builtinKeyTable(scrModView), builtinKeyTable(scrGlobal))
+	pageKeys := BuiltinViewPageKeys
 	for _, mod := range mods {
 		for _, a := range mod.Manifest.Actions {
 			builtin := BuiltinMissionsKeys
@@ -189,7 +189,7 @@ func (m Model) openModuleView(ref moduleViewRef) (tea.Model, tea.Cmd) {
 	}
 	m.screen = screenModuleView
 	m.mvRef = ref
-	m.seedHint(scrModView)
+	m.seedViewHint()
 	return m, m.viewFetchCmd(ref)
 }
 
@@ -221,6 +221,13 @@ func (m Model) onModViewMsg(msg modViewMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		st.loaded = false
 		if m.screen == screenModuleView && viewKey(m.mvRef) == key {
+			// Leaving the dead view must also close a filter input armed on
+			// it — otherwise the prompt strands over Missions, silently
+			// editing the failed view's retained filter.
+			if m.act == actViewFilter {
+				m.act = actNone
+				m.input.Blur()
+			}
 			m.screen = screenMissions
 			m.tabCur = 0
 		}
@@ -230,6 +237,11 @@ func (m Model) onModViewMsg(msg modViewMsg) (tea.Model, tea.Cmd) {
 	st.loaded = true
 	st.title = msg.title
 	st.rows = msg.rows
+	if m.screen == screenModuleView && viewKey(m.mvRef) == key {
+		// Content just landed on the visible view: refresh the rich hint
+		// ("/ filter" appears once rows exist, "refreshing …" retires).
+		m.seedViewHint()
+	}
 	if len(st.rows) > 0 {
 		if idxs := filteredIdx(st); st.cur >= len(idxs) {
 			st.cur = len(idxs) - 1
@@ -353,6 +365,12 @@ func (m Model) runViewAction(va module.ViewAction) (tea.Model, tea.Cmd) {
 	}
 	ref := m.mvRef
 	st := m.ensureViewState(ref)
+	if !st.loaded {
+		// Nothing rendered yet (first load in flight, or the last render
+		// failed): there is nothing to act on, and dispatching now would
+		// send a body-view-shaped payload for what may be a rows view.
+		return m, nil
+	}
 	var row *module.ViewRow
 	if len(st.rows) > 0 {
 		idxs := filteredIdx(st)
@@ -492,12 +510,12 @@ func (m Model) viewModuleView() string {
 		var lines []string
 		listH := h
 		if st.filter != "" {
-			lines = append(lines, dimStyle.Render(clip(fmt.Sprintf("filter: %s — %d/%d (/ edits, empty clears)", st.filter, len(idxs), len(st.rows)), w)))
+			lines = append(lines, dimStyle.Render(clipCells(fmt.Sprintf("filter: %s — %d/%d (/ edits, empty clears)", st.filter, len(idxs), len(st.rows)), w)))
 			listH--
 		}
 		start, end := windowBounds(cur, len(idxs), listH)
 		for i := start; i < end; i++ {
-			line := clip(st.rows[idxs[i]].Text, w)
+			line := clipCells(st.rows[idxs[i]].Text, w)
 			if i == cur {
 				line = selStyle.Width(w).Render(line)
 			}
@@ -511,6 +529,16 @@ func (m Model) viewModuleView() string {
 		content = st.vp.View()
 	}
 	box := paneFocused.Width(m.width - 2).Height(h).Render(content)
-	footer := footerStyle.Width(m.width).Render(m.viewFooterHint())
+	// The footer is the status line (seedViewHint keeps the rich hint there
+	// when nothing real is showing), clipped to one line — action outcomes,
+	// failures and refresh progress are visible AT the view, per the failure
+	// table. The filter input renders here too: an armed input must never be
+	// invisible.
+	var footer string
+	if m.act == actViewFilter {
+		footer = keyStyle.Render(m.prompt) + m.input.View()
+	} else {
+		footer = footerStyle.Render(clip(m.status, m.width))
+	}
 	return header + "\n" + box + "\n" + footer
 }

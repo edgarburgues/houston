@@ -27,7 +27,10 @@ type palItem struct {
 
 // paletteItems builds the full candidate list for the current screen: tabs
 // first, then the screen's commands and the globals — minus pure navigation
-// (noise in a finder) and the palette itself.
+// (noise in a finder), the palette itself, and view commands already listed
+// as tabs (both would land on the same tab). The visible view's page
+// actions join too, like they do in the ? overlay: the palette's contract
+// is every runnable command of the current screen.
 func (m Model) paletteItems() []palItem {
 	var out []palItem
 	for i := range m.tabs {
@@ -41,6 +44,16 @@ func (m Model) paletteItems() []palItem {
 		if c.category == "Navigate" || c.category == "Tabs" || c.title == "command palette" {
 			continue
 		}
+		if c.origin == originModule && screen == scrMissions {
+			if ref, ok := m.modViews["missions:"+c.keys[0]]; ok {
+				if _, promoted := m.tabIdx[viewKey(ref)]; promoted {
+					continue // the "tab: …" entry above is the same destination
+				}
+			}
+		}
+		out = append(out, palItem{title: c.title, label: c.label, module: c.module, key: c.keys[0], tab: -1})
+	}
+	for _, c := range m.viewActionCommands() {
 		out = append(out, palItem{title: c.title, label: c.label, module: c.module, key: c.keys[0], tab: -1})
 	}
 	return out
@@ -174,23 +187,32 @@ func (m Model) updatePaletteKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	var cmd tea.Cmd
+	before := m.palInput.Value()
 	m.palInput, cmd = m.palInput.Update(msg)
-	// The result set changed under the cursor: snap back to the best match.
-	m.palSel = 0
+	if m.palInput.Value() != before {
+		// The result set changed under the cursor: snap back to the best
+		// match. Pure cursor movement inside the input keeps the selection.
+		m.palSel = 0
+	}
 	return m, cmd
 }
 
 // viewPalette renders the finder over a quiet frame: input on top, ranked
 // matches below, selection highlighted, key labels on the right.
 func (m Model) viewPalette() string {
+	// Width and chrome both bend before overflowing: the panel never
+	// outgrows the terminal (the renderer would truncate from the TOP,
+	// eating the input row first), and short terminals drop the blank line
+	// and counter instead of rows.
 	w := 64
-	if w > m.width-4 {
-		w = m.width - 4
+	if w > m.width-2 {
+		w = m.width - 2
 	}
-	if w < 20 {
-		w = 20
+	if w < 12 {
+		w = 12
 	}
 	inner := w - 6 // border + padding
+	slim := m.bodyH() < 9
 	matches := m.palMatches()
 	sel := m.palSel
 	if sel >= len(matches) {
@@ -200,6 +222,9 @@ func (m Model) viewPalette() string {
 		sel = 0
 	}
 	maxRows := m.bodyH() - 7
+	if slim {
+		maxRows = m.bodyH() - 4
+	}
 	if maxRows > 12 {
 		maxRows = 12
 	}
@@ -207,7 +232,10 @@ func (m Model) viewPalette() string {
 		maxRows = 1
 	}
 	start, end := windowBounds(sel, len(matches), maxRows)
-	lines := []string{m.palInput.View(), ""}
+	lines := []string{m.palInput.View()}
+	if !slim {
+		lines = append(lines, "")
+	}
 	for i := start; i < end; i++ {
 		it := matches[i]
 		title := it.title
@@ -228,7 +256,7 @@ func (m Model) viewPalette() string {
 	}
 	if len(matches) == 0 {
 		lines = append(lines, dimStyle.Render("(no matching command)"))
-	} else if len(matches) > maxRows {
+	} else if len(matches) > maxRows && !slim {
 		lines = append(lines, dimStyle.Render(fmt.Sprintf("%d of %d", sel+1, len(matches))))
 	}
 	panel := helpBorderStyle.Width(w - 2).Render(strings.Join(lines, "\n"))

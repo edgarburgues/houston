@@ -29,6 +29,10 @@ import (
 var (
 	BuiltinMissionsKeys = unionKeys(builtinKeyTable(scrMissions), builtinKeyTable(scrGlobal))
 	BuiltinAccountsKeys = unionKeys(builtinKeyTable(scrAccounts), builtinKeyTable(scrGlobal))
+	// BuiltinViewPageKeys are the keys the module-view page itself owns —
+	// a view page action bound to one is pruned at startup, and ls/doctor
+	// audit against the same set.
+	BuiltinViewPageKeys = unionKeys(builtinKeyTable(scrModView), builtinKeyTable(scrGlobal))
 )
 
 // moduleActionRef pairs an action with its owning module for dispatch.

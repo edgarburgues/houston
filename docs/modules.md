@@ -84,6 +84,7 @@ known fields with wrong types are hard errors.
 | `transforms.missions`, `transforms.preview` | object | `command` argv + optional `timeoutMs` |
 | `statusline` | object | one segment per module: `command`, `ttlSeconds` (default 60, clamped to [60, 3600]), `timeoutMs` (clamped to [500, 4000]) |
 | `preLaunch` | object | `command` argv, run interactively before every claude launch; `timeoutMs` is ignored (the user owns the terminal). Exit 0 continues the launch, anything else cancels it. See [`launch.before`](#launchbefore) |
+| `views[]` | array | ≤ 8 entries. Each: `id` (name charset), `key` (missions key space), `title` 1–40 runes, `command` argv, `timeoutMs`, `tab` bool (promote to a strip tab), `actions[]` ≤ 8 page actions: `id`, `key` (page-scoped; `enter` allowed here only), `title` 1–40 runes, `interactive`, `refreshAfter`, `timeoutMs` (action-surface policy). See [`view.render`](#viewrender) |
 | `theme` | object | same shape as `config.json`'s `theme`; see [theme](#settings-and-theme) |
 
 ### Name rules
@@ -106,16 +107,17 @@ them into other keys and they could never fire: `ctrl+i` (arrives as `tab`),
 Built-in keys always win. A module action or view whose key collides with a
 built-in is dropped at startup with a warning (visible in `module ls` and
 `doctor`), never intermittently routed. The tab keys `1 2 3 4 5 6 7 8 9 [ ]`
-are reserved on **every** screen. Additionally reserved on the missions
-screen: `q ctrl+c ? A tab up down k j left right h l / esc pgdown pgup f b
-enter * a t n m p P x e r` — and on the accounts screen: `q ctrl+c esc ? A
-tab up k down j r d x enter`.
+and the palette keys `: ctrl+p` are reserved on **every** screen.
+Additionally reserved on the missions screen: `q ctrl+c ? A tab up down k j
+left right h l / esc pgdown pgup f b enter * a t n m p P x e r` — and on
+the accounts screen: `q ctrl+c esc ? A tab up k down j r d x enter`.
 
-Between modules: all modules' **actions** claim their keys first (in
-lexicographic module-name order), then all **views** do — so any module's
-missions action beats any module's view on the same key, and within each
-class the first claimant in lexicographic name order keeps it. Losers are
-dropped with the same startup warning and show up in `module ls`/`doctor`.
+Between modules the rule is pure first-claimant: modules are processed in
+lexicographic name order, each claiming its actions first and its views
+right after, into ONE shared key space per screen — an earlier module keeps
+a key whatever the class, so an earlier module's view beats a later
+module's action on the same missions key. Losers are dropped with the same
+startup warning and show up in `module ls`/`doctor`.
 
 ### Command resolution
 
@@ -308,9 +310,11 @@ segment silently disappears — an error string never reaches the line.
 Views are module-contributed full-screen pages: read-only, plain text
 (ANSI/control stripped), scrolled by Houston. Declared as
 `"views": [{"id": "issues", "key": "I", "title": "Jira issues", "command":
-[...]}]` (max 8 per module; view keys share the missions screen space with
-EVERY module's missions actions — actions claim first, then views, see the
-Action keys section — and built-ins win). Payload: `{ "view": "issues" }`.
+[...]}]` (max 8 per module, plus up to 8 page `actions` per view; view
+keys live in the missions key space under the first-claimant rule of the
+Action keys section — within one module its actions claim before its
+views, across modules the earlier module wins, and built-ins always beat
+both). Payload: `{ "view": "issues" }`.
 Reply:
 
 ```json
@@ -499,8 +503,8 @@ exit code is nonzero if anything fails, so module repos can run it in CI.
 - Default input is a synthetic fixture: two missions (one pinned and tagged
   `wip`), one account. `--live` feeds the real scan; `--mission <key>`
   selects a specific mission (implies `--live`).
-- `--event` filters to one surface: `action`, `transform`, `preview` or
-  `segment` (full event names work too).
+- `--event` filters to one surface: `action`, `transform`, `preview`,
+  `segment`, `prelaunch`, `view` or `invoke` (full event names work too).
 - The module only needs to exist under `modules/<name>/` — disabled and even
   unregistered modules are testable; running `module test` is itself the
   consent to execute that module's handlers once.

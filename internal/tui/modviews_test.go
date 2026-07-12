@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"houston/internal/module"
 )
@@ -159,6 +160,11 @@ func TestRowsViewNavigationFilterAndActions(t *testing.T) {
 	m = tm.(Model)
 	ref := m.mvRef
 	st := m.mvStates[viewKey(ref)]
+	// Before the first render lands there is nothing to act on: the page
+	// action must no-op instead of dispatching a body-shaped payload.
+	if _, cmd := m.updateModuleViewKeys(key(tea.KeyEnter)); cmd != nil {
+		t.Fatal("an action on an unloaded view must no-op")
+	}
 	tm, _ = m.Update(modViewMsg{gen: st.gen, mod: "jira", id: "list", title: "Issues (3)", rows: []module.ViewRow{
 		{ID: "A-1", Text: "A-1 alpha"}, {ID: "B-2", Text: "B-2 beta"}, {ID: "A-3", Text: "A-3 gamma"},
 	}})
@@ -181,6 +187,9 @@ func TestRowsViewNavigationFilterAndActions(t *testing.T) {
 	m = drive(m, runes("/"))
 	if m.act != actViewFilter {
 		t.Fatal("/ must open the filter input on a rows view")
+	}
+	if !strings.Contains(m.View(), "Filter:") {
+		t.Fatal("an armed filter input must be visible in the frame")
 	}
 	m = drive(m, runes("a"), runes("l"))
 	if got := filteredIdx(st); len(got) != 1 || got[0] != 0 {
@@ -237,5 +246,77 @@ func TestViewActMsgRefreshRerendersView(t *testing.T) {
 	m = tm.(Model)
 	if cmd != nil || !strings.Contains(m.status, "boom") {
 		t.Fatalf("a failed action must not refresh: cmd=%v status=%q", cmd, m.status)
+	}
+}
+
+// TestViewStatusAndFooterIntegrity: action outcomes are visible AT the view,
+// the footer never wraps however long the page-action hints get, and a
+// failed render closes a filter input armed on the dying view.
+func TestViewStatusAndFooterIntegrity(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	mod := rowsModule()
+	mod.Manifest.Views[0].Actions = []module.ViewAction{
+		{ID: "open", Key: "enter", Title: "open the selected issue in the default browser"},
+		{ID: "comment", Key: "c", Title: "add a long-form comment to the selected issue"},
+		{ID: "assign", Key: "a2", Title: "reassign the selected issue to another user"},
+	}
+	mod.Manifest.Views[0].Actions[2].Key = "z"
+	m := newModelMods(t, mod)
+	tm, _ := m.Update(runes("I"))
+	m = tm.(Model)
+	ref := m.mvRef
+	st := m.mvStates[viewKey(ref)]
+	tm, _ = m.Update(modViewMsg{gen: st.gen, mod: "jira", id: "list", title: "Issues (1)", rows: []module.ViewRow{{ID: "A-1", Text: "A-1 alpha"}}})
+	m = tm.(Model)
+
+	// A view action outcome must be visible in the view's own frame.
+	tm, _ = m.Update(viewActMsg{ref: ref, id: "open", status: "opened A-1"})
+	m = tm.(Model)
+	if !strings.Contains(m.View(), "[jira] opened A-1") {
+		t.Fatal("the view frame must show the action outcome")
+	}
+
+	// The frame never exceeds the terminal height, however long the hints.
+	if got := len(strings.Split(m.View(), "\n")); got != m.height {
+		t.Fatalf("frame height %d, terminal %d", got, m.height)
+	}
+
+	// A failed render while the filter input is armed must close the input
+	// with the view.
+	m = drive(m, runes("/"))
+	st.gen++
+	st.inflight = true
+	tm, _ = m.Update(modViewMsg{gen: st.gen, mod: "jira", id: "list", err: errors.New("boom")})
+	m = tm.(Model)
+	if m.screen != screenMissions || m.act != actNone {
+		t.Fatalf("failure must close the stranded input: screen=%v act=%v", m.screen, m.act)
+	}
+}
+
+// TestClipCellsBudgetsDisplayWidth: module-controlled row text with
+// double-width runes must clip by cells, or the pane wraps and the frame
+// outgrows the terminal.
+func TestClipCellsBudgetsDisplayWidth(t *testing.T) {
+	wide := strings.Repeat("日", 120) // 120 CJK runes = 240 cells
+	got := clipCells(wide, 76)
+	if w := lipgloss.Width(got); w > 76 {
+		t.Fatalf("clipCells produced %d cells for a 76 budget", w)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatal("clipped text should end in an ellipsis")
+	}
+	if clipCells("short", 76) != "short" {
+		t.Fatal("text within budget must pass through")
+	}
+
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	m := newModelMods(t, rowsModule())
+	tm, _ := m.Update(runes("I"))
+	m = tm.(Model)
+	st := m.mvStates[viewKey(m.mvRef)]
+	tm, _ = m.Update(modViewMsg{gen: st.gen, mod: "jira", id: "list", title: "W", rows: []module.ViewRow{{ID: "w", Text: wide}}})
+	m = tm.(Model)
+	if got := len(strings.Split(m.View(), "\n")); got != m.height {
+		t.Fatalf("wide rows must not grow the frame: %d lines for height %d", got, m.height)
 	}
 }

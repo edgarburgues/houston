@@ -83,21 +83,37 @@ func (m Model) updateGlobalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
-// seedHint replaces the footer with a screen hint only when nothing real is
-// showing: the ready line, another hint and transient prompts are fair game,
-// but errors, warnings and action results survive tab switches — a hint must
-// never destroy a message the user hasn't read (the F5 notices ring will
-// archive these properly).
-func (m *Model) seedHint(screen string) {
+// statusDisposable reports whether the footer currently shows something a
+// hint may replace: the ready line, another hint (rich view hints end with
+// the core module-view hint), transient prompts and progress lines. Errors,
+// warnings and action results are NOT disposable — they survive tab
+// switches until something newer lands (the Notices ring archives them).
+func (m Model) statusDisposable() bool {
 	s := m.status
-	overwritable := s == "" ||
+	return s == "" ||
 		strings.HasPrefix(s, "Houston ready") ||
 		strings.HasPrefix(s, "delete account ") ||
+		strings.HasPrefix(s, "refreshing ") ||
 		s == hintFor(m.registry, scrMissions) ||
 		s == hintFor(m.registry, scrAccounts) ||
-		s == hintFor(m.registry, scrModView)
-	if overwritable {
+		s == hintFor(m.registry, scrNotices) ||
+		strings.HasSuffix(s, hintFor(m.registry, scrModView))
+}
+
+// seedHint replaces a disposable footer with a screen hint.
+func (m *Model) seedHint(screen string) {
+	if m.statusDisposable() {
 		m.status = hintFor(m.registry, screen)
+	}
+}
+
+// seedViewHint seeds the visible module view's RICH hint — its page actions
+// and the / filter ahead of the core keys — under the same disposability
+// rule. The module-view footer renders m.status, so this is also how the
+// hint reaches the screen.
+func (m *Model) seedViewHint() {
+	if m.statusDisposable() {
+		m.status = m.viewFooterHint()
 	}
 }
 
@@ -147,7 +163,7 @@ func (m Model) switchTab(n int) (tea.Model, tea.Cmd) {
 	case tabModView:
 		m.screen = screenModuleView
 		m.mvRef = t.ref
-		m.seedHint(scrModView)
+		m.seedViewHint()
 		return m, m.viewFetchCmd(t.ref)
 	}
 	return m, nil

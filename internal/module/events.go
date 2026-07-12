@@ -179,11 +179,13 @@ type ViewRow struct {
 }
 
 // ViewInvokePayload is the view.invoke payload: which view, which of its
-// actions, and the selected row (nil on a body view).
+// actions, and the selected row. On a body view Row is nil and the wire
+// carries an explicit "row": null — never an absent key — so handlers can
+// read payload["row"] unconditionally, as the docs promise.
 type ViewInvokePayload struct {
 	View   string   `json:"view"`
 	Action string   `json:"action"`
-	Row    *ViewRow `json:"row,omitempty"`
+	Row    *ViewRow `json:"row"`
 }
 
 type viewReply struct {
