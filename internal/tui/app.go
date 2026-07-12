@@ -78,38 +78,40 @@ type Model struct {
 	st       *store.Store
 	missions []model.Mission
 
-	left      []leftItem
-	leftCur   int
-	mid       []model.Mission
-	midCur    int
-	focus     focus
-	preview   viewport.Model
-	input     textinput.Model
-	act       action
-	prompt    string
-	query     string
-	status    string
-	showHelp  bool
-	width     int
-	height    int
-	ready     bool
-	lay       theme.Layout
+	left    []leftItem
+	leftCur int
+	mid     []model.Mission
+	midCur  int
+	focus   focus
+	preview viewport.Model
+	input   textinput.Model
+	act     action
+	prompt  string
+	query   string
+	status  string
+	width   int
+	height  int
+	ready   bool
+	lay     theme.Layout
+
+	// which-key help overlay (help.go), generated from the registry.
+	helpOpen   bool
+	helpScroll int
 
 	// modules
-	mods         []module.Module            // enabled, loaded once in New, immutable
-	modActions   map[string]moduleActionRef // "missions:J" → the winning module action
-	warned       map[string]bool            // once-per-module-per-session passive-surface warnings
-	helpMissions string                     // help footers with module actions appended, built once
-	helpAccounts string
-	modCtx       context.Context    // root context every module exec derives from
-	modCancel    context.CancelFunc // quit-time root cancel; never nil
+	mods       []module.Module            // enabled, loaded once in New, immutable
+	modActions map[string]moduleActionRef // "missions:J" → the winning module action
+	registry   []command                  // core + module commands; overlay and footer hints derive from it
+	warned     map[string]bool            // once-per-module-per-session passive-surface warnings
+	modCtx     context.Context            // root context every module exec derives from
+	modCancel  context.CancelFunc         // quit-time root cancel; never nil
 
 	// module transforms + preview sections (see modtransforms.go)
-	modPatches     map[string]module.Patch     // merged presentation patches by mission key
+	modPatches map[string]module.Patch // merged presentation patches by mission key
 	// cwdMissing flags missions whose (possibly overridden) cwd no longer
 	// exists on disk - a moved project. viewMid composes a core "cwd?" badge
 	// for them and key m offers the remap. Rebuilt by adoptMissions.
-	cwdMissing map[string]bool
+	cwdMissing     map[string]bool
 	xformGen       int                         // generation of the newest transform dispatch
 	xformStop      context.CancelFunc          // cancels the in-flight transform run; never nil
 	initXform      tea.Cmd                     // startup transform dispatch, built in New
@@ -157,7 +159,6 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 		missions:   missions,
 		input:      ti,
 		focus:      focusMid,
-		status:     "Houston ready · / search · enter resume · ? help",
 		lay:        curLayout,
 		mods:       mods,
 		warned:     map[string]bool{},
@@ -194,18 +195,11 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 	vrefs, vaccepted, viewWarns := buildModViews(mods, actionKeys)
 	m.modViews = vrefs
 	actionWarns = append(actionWarns, viewWarns...)
-	m.helpMissions, m.helpAccounts = missionsHelp, accountsHelp
-	for _, r := range accepted {
-		entry := " · " + keyLabel(r.act.Key) + " " + r.act.Title
-		if r.act.Screen == "accounts" {
-			m.helpAccounts += entry
-		} else {
-			m.helpMissions += entry
-		}
-	}
-	for _, r := range vaccepted {
-		m.helpMissions += " · " + keyLabel(r.view.Key) + " " + r.view.Title
-	}
+	// The command registry: core bindings plus the surviving module actions
+	// and views. The ? overlay and the footer hints render from it, so a
+	// dropped contribution can never be advertised.
+	m.registry = append(coreCommands(), moduleCommands(accepted, vaccepted)...)
+	m.status = "Houston ready · " + hintFor(m.registry, scrMissions)
 	if warns := append(append([]string{}, loadWarns...), actionWarns...); len(warns) > 0 {
 		// Skipped modules and dropped actions surface once at startup;
 		// ls/doctor show them too.
@@ -232,9 +226,11 @@ func (m Model) Init() tea.Cmd { return m.initXform }
 var (
 	cBlue, cGrey, cDim, cGreen, cYellow, cBg lipgloss.Color
 
-	headerStyle, footerStyle, paneFocused, paneBlurred lipgloss.Style
-	selStyle, dimStyle, titleStyle, keyStyle           lipgloss.Style
-	labelStyle, valStyle, pinStyle, tagStyle           lipgloss.Style
+	headerStyle, footerStyle, paneFocused, paneBlurred    lipgloss.Style
+	selStyle, dimStyle, titleStyle, keyStyle              lipgloss.Style
+	labelStyle, valStyle, pinStyle, tagStyle              lipgloss.Style
+	helpTitleStyle, helpSectionStyle, helpModSectionStyle lipgloss.Style
+	helpBorderStyle                                       lipgloss.Style
 
 	// curLayout is copied by New into Model.lay, so pane math never reads
 	// mutable package state after startup.
@@ -263,6 +259,10 @@ func applyTheme(t theme.Theme) {
 	valStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("231"))
 	pinStyle = lipgloss.NewStyle().Foreground(cYellow)
 	tagStyle = lipgloss.NewStyle().Foreground(cGreen)
+	helpTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231"))
+	helpSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
+	helpModSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(cGreen)
+	helpBorderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cBlue).Padding(0, 2)
 
 	curLayout = t.Layout
 }
@@ -572,6 +572,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.act != actNone {
 			return m.updateInput(msg)
 		}
+		if m.helpOpen {
+			return m.updateHelpKeys(msg)
+		}
 		if m.screen == screenAccounts {
 			return m.updateAccountsKeys(msg)
 		}
@@ -591,6 +594,10 @@ func (m Model) enterAccounts() (tea.Model, tea.Cmd) {
 	m.accs, _ = accounts.Load()
 	m.screen = screenAccounts
 	m.accCur = 0
+	// The footer is the status line on every screen now (so the two-step
+	// delete confirmation is actually visible); entering seeds it with the
+	// screen's hint.
+	m.status = hintFor(m.registry, scrAccounts)
 	m.accProbes = map[string]usage.Probe{}
 	if len(m.accs) > 0 {
 		m.accProbing = true
@@ -617,6 +624,10 @@ func (m Model) updateAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc", "A", "tab":
 		m.screen = screenMissions
+		m.status = hintFor(m.registry, scrMissions)
+	case "?":
+		m.helpOpen = true
+		m.helpScroll = 0
 	case "up", "k":
 		if m.accCur > 0 {
 			m.accCur--
@@ -684,7 +695,8 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.modCancel() // root cancel: every in-flight module exec dies with the TUI
 		return m, tea.Quit
 	case "?":
-		m.showHelp = !m.showHelp
+		m.helpOpen = true
+		m.helpScroll = 0
 	case "A":
 		return m.enterAccounts()
 	case "tab":
@@ -1068,6 +1080,9 @@ func (m Model) View() string {
 	if !m.ready {
 		return "loading Houston…"
 	}
+	if m.helpOpen {
+		return m.viewHelp()
+	}
 	if m.screen == screenAccounts {
 		return m.viewAccounts()
 	}
@@ -1084,8 +1099,6 @@ func (m Model) View() string {
 	var footer string
 	if m.act != actNone {
 		footer = keyStyle.Render(m.prompt) + m.input.View()
-	} else if m.showHelp {
-		footer = footerStyle.Render(clip(m.helpMissions, m.width))
 	} else {
 		footer = footerStyle.Render(clip(m.status, m.width))
 	}
@@ -1291,7 +1304,9 @@ func (m Model) viewAccounts() string {
 		}
 	}
 	body := paneFocused.Width(w).Height(h).Render(padBox(lines, h))
-	footer := footerStyle.Render(clip(m.helpAccounts, m.width))
+	// Status, not a static key list: delete confirmations and probe errors
+	// must be visible here. enterAccounts seeds it with the screen hint.
+	footer := footerStyle.Render(clip(m.status, m.width))
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 

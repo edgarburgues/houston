@@ -115,6 +115,10 @@ func (m Model) updateModuleViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "backspace":
 		m.screen = screenMissions
 		return m, nil
+	case "?":
+		m.helpOpen = true
+		m.helpScroll = 0
+		return m, nil
 	case "r":
 		m.mvGen++
 		m.mv.SetContent(dimStyle.Render("refreshing " + m.mvRef.view.Title + "…"))
@@ -140,6 +144,6 @@ func (m Model) updateModuleViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) viewModuleView() string {
 	header := headerStyle.Width(m.width).Render("▤ " + m.mvTitle + "  · " + m.mvRef.mod.Name)
 	body := paneFocused.Width(m.width - 2).Height(m.bodyH() - 2).Render(m.mv.View())
-	footer := footerStyle.Width(m.width).Render("↑↓/jk scroll · pgup/pgdn · g/G top/bottom · r refresh · esc back · q quit")
+	footer := footerStyle.Width(m.width).Render(hintFor(m.registry, scrModView))
 	return header + "\n" + body + "\n" + footer
 }

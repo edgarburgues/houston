@@ -18,31 +18,15 @@ import (
 )
 
 // BuiltinMissionsKeys and BuiltinAccountsKeys mirror the case sets of
-// updateKeys and updateAccountsKeys. Conditionally-consumed keys ("x" only
-// acts inside a program view) stay reserved: partial consumption must not
-// make a binding intermittently module-owned. A drift test asserts each
-// table equals its switch's cases, and `module ls`/doctor consult them to
-// flag shadowed keys.
-var BuiltinMissionsKeys = map[string]bool{
-	"q": true, "ctrl+c": true, "?": true, "A": true, "tab": true,
-	"up": true, "down": true, "k": true, "j": true,
-	"left": true, "right": true, "h": true, "l": true,
-	"/": true, "esc": true, "pgdown": true, "pgup": true, "f": true, "b": true,
-	"enter": true, "*": true, "a": true, "t": true, "n": true, "m": true,
-	"p": true, "P": true, "x": true, "e": true, "r": true,
-}
-
-var BuiltinAccountsKeys = map[string]bool{
-	"q": true, "ctrl+c": true, "esc": true, "A": true, "tab": true,
-	"up": true, "k": true, "down": true, "j": true,
-	"r": true, "d": true, "x": true, "enter": true,
-}
-
-// Help-footer base literals; New appends the enabled modules' surviving
-// actions once, so View renders a plain string.
-const (
-	missionsHelp = "↑↓/jk move · tab/←→ pane · / search · enter resume · * pin · a archive · t tag · n note · m remap cwd · p→prog · P new · x remove · e export · A accounts · r reindex · q quit"
-	accountsHelp = "↑↓ move · enter launch session · r probe usage · d/x remove · esc back · q quit"
+// updateKeys and updateAccountsKeys, derived from the command registry so
+// the switches, the conflict tables and the help overlay share one source.
+// Conditionally-consumed keys ("x" only acts inside a program view) stay
+// reserved: partial consumption must not make a binding intermittently
+// module-owned. A drift test asserts each table equals its switch's cases,
+// and `module ls`/doctor consult them to flag shadowed keys.
+var (
+	BuiltinMissionsKeys = builtinKeyTable(scrMissions)
+	BuiltinAccountsKeys = builtinKeyTable(scrAccounts)
 )
 
 // moduleActionRef pairs an action with its owning module for dispatch.

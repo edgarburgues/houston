@@ -17,14 +17,14 @@ import (
 )
 
 // switchCaseStrings extracts every string literal used as a case expression
-// inside the named function in app.go — the ground truth the builtin key
-// tables must mirror.
-func switchCaseStrings(t *testing.T, fn string) map[string]bool {
+// inside the named function in the given file — the ground truth the
+// registry-derived key tables must mirror.
+func switchCaseStrings(t *testing.T, file, fn string) map[string]bool {
 	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "app.go", nil, 0)
+	f, err := parser.ParseFile(fset, file, nil, 0)
 	if err != nil {
-		t.Fatalf("parse app.go: %v", err)
+		t.Fatalf("parse %s: %v", file, err)
 	}
 	out := map[string]bool{}
 	found := false
@@ -52,26 +52,28 @@ func switchCaseStrings(t *testing.T, fn string) map[string]bool {
 		})
 	}
 	if !found {
-		t.Fatalf("function %s not found in app.go", fn)
+		t.Fatalf("function %s not found in %s", fn, file)
 	}
 	return out
 }
 
-// TestBuiltinKeyTablesMatchSwitches keeps the exported tables and the key
-// switches from drifting apart: a case added without its table entry would
-// let a module claim a built-in key, and a stale table entry would reserve a
-// key no built-in uses.
+// TestBuiltinKeyTablesMatchSwitches keeps the registry (which the tables,
+// the overlay and the hints derive from) and the key switches from drifting
+// apart: a case added without its registry entry would let a module claim a
+// built-in key and hide the binding from help, and a stale registry entry
+// would advertise a key no switch handles.
 func TestBuiltinKeyTablesMatchSwitches(t *testing.T) {
 	tests := []struct {
-		fn    string
-		table map[string]bool
+		file, fn string
+		table    map[string]bool
 	}{
-		{"updateKeys", BuiltinMissionsKeys},
-		{"updateAccountsKeys", BuiltinAccountsKeys},
+		{"app.go", "updateKeys", BuiltinMissionsKeys},
+		{"app.go", "updateAccountsKeys", BuiltinAccountsKeys},
+		{"modviews.go", "updateModuleViewKeys", builtinKeyTable(scrModView)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.fn, func(t *testing.T) {
-			got := switchCaseStrings(t, tt.fn)
+			got := switchCaseStrings(t, tt.file, tt.fn)
 			for k := range got {
 				if !tt.table[k] {
 					t.Errorf("switch case %q missing from the builtin table", k)
@@ -196,24 +198,38 @@ func TestModActionMsgStatusAndRefresh(t *testing.T) {
 	}
 }
 
-func TestHelpFooterAdvertisesModuleActions(t *testing.T) {
+func TestHelpOverlayAdvertisesModuleActions(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir()) // the accounts screen loads the store
 	m := newModelMods(t, modWith("demo",
 		module.Action{ID: "open", Key: "J", Title: "open Jira ticket", Screen: "missions"},
 		module.Action{ID: "log", Key: "ctrl+j", Title: "log time to Jira", Screen: "missions", Interactive: true},
 		module.Action{ID: "probe", Key: "u", Title: "account usage", Screen: "accounts"},
 		module.Action{ID: "dead", Key: "r", Title: "shadowed by reindex", Screen: "missions"},
 	))
-	if !strings.HasSuffix(m.helpMissions, " · J open Jira ticket · ^J log time to Jira") {
-		t.Errorf("missions footer should list the surviving actions: %q", m.helpMissions)
-	}
-	if !strings.HasSuffix(m.helpAccounts, " · u account usage") {
-		t.Errorf("accounts footer should list the surviving actions: %q", m.helpAccounts)
-	}
-	if strings.Contains(m.helpMissions, "shadowed by reindex") {
-		t.Errorf("a dropped action must never be advertised: %q", m.helpMissions)
-	}
 	if !strings.Contains(m.status, "dead") {
 		t.Errorf("startup status should warn about the dropped action: %q", m.status)
+	}
+	m = drive(m, runes("?"))
+	if !m.helpOpen {
+		t.Fatal("? must open the help overlay")
+	}
+	view := m.View()
+	for _, want := range []string{"demo", "open Jira ticket", "^J", "log time to Jira"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("missions overlay should advertise %q", want)
+		}
+	}
+	if strings.Contains(view, "shadowed by reindex") {
+		t.Errorf("a dropped action must never be advertised")
+	}
+	// The accounts overlay carries the accounts-screen action and nothing else.
+	m = drive(m, key(tea.KeyEsc), runes("A"), runes("?"))
+	view = m.View()
+	if !strings.Contains(view, "account usage") {
+		t.Errorf("accounts overlay should advertise the accounts action")
+	}
+	if strings.Contains(view, "open Jira ticket") {
+		t.Errorf("missions actions must not leak into the accounts overlay")
 	}
 }
 
