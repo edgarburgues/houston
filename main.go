@@ -800,6 +800,9 @@ func surfacesSummary(man module.Manifest) string {
 	if man.PreLaunch != nil {
 		parts = append(parts, "preLaunch")
 	}
+	if n := len(man.Views); n > 0 {
+		parts = append(parts, fmt.Sprintf("views:%d", n))
+	}
 	if man.Theme != nil {
 		parts = append(parts, "theme")
 	}
@@ -867,6 +870,9 @@ func manifestCommands(man module.Manifest) []modCommand {
 	}
 	if h := man.PreLaunch; h != nil {
 		out = append(out, modCommand{"preLaunch", h.Command})
+	}
+	for _, v := range man.Views {
+		out = append(out, modCommand{"view " + v.ID, v.Command})
 	}
 	return out
 }

@@ -9,7 +9,7 @@ under enforced timeouts, output caps and process-tree kill.
 
 `<store>` is `~/.claude/houston` (override with `$HOUSTON_HOME`).
 
-A module can contribute to five exec'd surfaces, plus one declarative one:
+A module can contribute to six exec'd surfaces, plus one declarative one:
 
 | Surface | Manifest key | Event | What it does |
 |---|---|---|---|
@@ -18,6 +18,7 @@ A module can contribute to five exec'd surfaces, plus one declarative one:
 | Preview sections | `transforms.preview` | `preview.append` | append sections to the selected mission's preview pane |
 | Statusline segment | `statusline` | `statusline.segment` | one cached text segment in `houston statusline` |
 | Pre-launch hook | `preLaunch` | `launch.before` | interactive gate before every claude launch (exit 0 = continue, else cancel) |
+| Full-screen view | `views[]` | `view.render` | a read-only page opened from the missions screen by its key; r refreshes, esc returns |
 | Theme | `theme` | — | color/layout overrides, no handler involved |
 
 ## Quick start
@@ -295,6 +296,24 @@ the segment this cycle (valid). Segments render in `houston statusline`
 only, appended after the account bars; the TUI does not show them. When a
 refresh fails, the last good text is kept for up to 10 minutes, then the
 segment silently disappears — an error string never reaches the line.
+
+### `view.render`
+
+Views are module-contributed full-screen pages: read-only, plain text
+(ANSI/control stripped), scrolled by Houston. Declared as
+`"views": [{"id": "issues", "key": "I", "title": "Jira issues", "command":
+[...]}]` (max 8 per module; keys share the missions screen space with the
+module's own actions, built-ins win). Payload: `{ "view": "issues" }`.
+Reply:
+
+```json
+{ "title": "My issues (17)", "body": "STIC-1  ACTIVO  ...
+STIC-2  ..." }
+```
+
+`title` (<= 60 runes) defaults to the manifest title; `body` is clamped to
+256 KiB. The page re-renders on `r`; `esc` returns to the missions screen.
+A failed render drops back to the missions screen with the footer notice.
 
 ### `launch.before`
 

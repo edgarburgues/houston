@@ -35,6 +35,7 @@ const (
 	EventPreview   = "preview.append"
 	EventSegment   = "statusline.segment"
 	EventPreLaunch = "launch.before"
+	EventView      = "view.render"
 )
 
 // Envelope is the single JSON object a handler receives on stdin (interactive
@@ -160,6 +161,44 @@ type PreLaunchPayload struct {
 	Cwd     string      `json:"cwd"`
 	Mission *MissionRow `json:"mission,omitempty"`
 	Account *AccountRow `json:"account,omitempty"`
+}
+
+// ViewPayload is the view.render payload: which of the module's views to
+// draw. Views are global pages, not selection-bound - the payload carries no
+// mission on purpose.
+type ViewPayload struct {
+	View string `json:"view"`
+}
+
+type viewReply struct {
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	Notice string `json:"notice"`
+}
+
+// maxViewBody bounds a rendered view; plenty for a readable page, small
+// enough that a runaway handler cannot balloon the TUI.
+const maxViewBody = 256 << 10
+
+// RunView renders one module view through the full Invoke hardening. The
+// reply title (cleaned, <= 60 runes) falls back to the manifest title; the
+// body is plain text (ANSI/control stripped, newlines kept).
+func RunView(ctx context.Context, m Module, v View) (string, string, error) {
+	env := NewEnvelope(EventView, m, ViewPayload{View: v.ID})
+	raw, err := Invoke(ctx, m, v.Command, env, CapReply, m.Manifest.ResolveTimeout(SurfaceView, v.TimeoutMs))
+	if err != nil {
+		return "", "", err
+	}
+	var rep viewReply
+	if err := DecodeReply(raw, &rep); err != nil {
+		LogEvent(m.Name, EventView, err.Error(), nil)
+		return "", "", err
+	}
+	title := CleanLine(rep.Title, 60)
+	if title == "" {
+		title = v.Title
+	}
+	return title, cleanBody(rep.Body, maxViewBody), nil
 }
 
 // PreLaunchMods filters the modules that declare a pre-launch hook,

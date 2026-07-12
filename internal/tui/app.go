@@ -41,6 +41,7 @@ type screen int
 const (
 	screenMissions screen = iota
 	screenAccounts
+	screenModuleView
 )
 
 type action int
@@ -126,6 +127,14 @@ type Model struct {
 	// next d/x press confirms. Any other key disarms it.
 	pendingDelete string
 
+	// module views (modviews.go): the open full-screen page, its viewport
+	// and the generation stamp that drops stale renders.
+	modViews map[string]moduleViewRef
+	mv       viewport.Model
+	mvRef    moduleViewRef
+	mvTitle  string
+	mvGen    int
+
 	// pending is a claude launch parked while its pre-launch hooks run
 	// (modprelaunch.go); nil when no launch is in flight. launchGen stamps
 	// each chain so a stale hook verdict can never drive a newer one.
@@ -176,6 +185,15 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 	}
 	refs, accepted, actionWarns := buildModActions(mods)
 	m.modActions = refs
+	actionKeys := map[string]bool{}
+	for id := range refs {
+		if k, ok := strings.CutPrefix(id, "missions:"); ok {
+			actionKeys[k] = true
+		}
+	}
+	vrefs, vaccepted, viewWarns := buildModViews(mods, actionKeys)
+	m.modViews = vrefs
+	actionWarns = append(actionWarns, viewWarns...)
 	m.helpMissions, m.helpAccounts = missionsHelp, accountsHelp
 	for _, r := range accepted {
 		entry := " · " + keyLabel(r.act.Key) + " " + r.act.Title
@@ -184,6 +202,9 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 		} else {
 			m.helpMissions += entry
 		}
+	}
+	for _, r := range vaccepted {
+		m.helpMissions += " · " + keyLabel(r.view.Key) + " " + r.view.Title
 	}
 	if warns := append(append([]string{}, loadWarns...), actionWarns...); len(warns) > 0 {
 		// Skipped modules and dropped actions surface once at startup;
@@ -467,6 +488,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.preview = viewport.New(m.rightW()-2, m.bodyH()-2)
+		mvContent := m.mv.View()
+		m.mv = viewport.New(m.width-4, m.bodyH()-2)
+		if m.screen == screenModuleView {
+			m.mv.SetContent(mvContent)
+		}
 		m.ready = true
 		m.refresh()
 		return m, nil
@@ -481,6 +507,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case hookDoneMsg:
 		return m.onHookDone(msg)
+
+	case modViewMsg:
+		return m.onModViewMsg(msg)
 
 	case accProbeMsg:
 		m.accProbes = map[string]usage.Probe{}
@@ -545,6 +574,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == screenAccounts {
 			return m.updateAccountsKeys(msg)
+		}
+		if m.screen == screenModuleView {
+			return m.updateModuleViewKeys(msg)
 		}
 		return m.updateKeys(msg)
 	}
@@ -757,6 +789,9 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// here because colliding actions were dropped when the model was built.
 	if ref, ok := m.modActions["missions:"+msg.String()]; ok {
 		return m.runModuleAction(ref)
+	}
+	if ref, ok := m.modViews["missions:"+msg.String()]; ok {
+		return m.openModuleView(ref)
 	}
 	return m, nil
 }
@@ -1035,6 +1070,9 @@ func (m Model) View() string {
 	}
 	if m.screen == screenAccounts {
 		return m.viewAccounts()
+	}
+	if m.screen == screenModuleView {
+		return m.viewModuleView()
 	}
 	header := headerStyle.Width(m.width).Render(fmt.Sprintf("🚀 Houston   %d missions   ·   %d programs   ·   [A] accounts", len(m.missions), len(m.st.Programs)))
 

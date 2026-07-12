@@ -98,6 +98,7 @@ type Manifest struct {
 	} `json:"transforms"`
 	Statusline *Segment         `json:"statusline"`
 	PreLaunch  *Handler         `json:"preLaunch"`
+	Views      []View           `json:"views"`
 	Theme      *theme.Overrides `json:"theme"`
 }
 
@@ -141,6 +142,17 @@ func (s Segment) TTL() time.Duration {
 	return time.Duration(t) * time.Second
 }
 
+// View is a module-contributed full-screen read-only page, opened from the
+// missions screen by its key. The handler renders on demand (view.render)
+// and on the r refresh key; plain text only, scrolled by Houston.
+type View struct {
+	ID        string   `json:"id"`
+	Key       string   `json:"key"`
+	Title     string   `json:"title"`
+	Command   []string `json:"command"`
+	TimeoutMs int      `json:"timeoutMs"`
+}
+
 // Surface identifies which per-surface timeout default and clamp applies to
 // a handler exec.
 type Surface int
@@ -150,6 +162,7 @@ const (
 	SurfaceTransform                // missions transform
 	SurfacePreview                  // preview append
 	SurfaceSegment                  // statusline segment
+	SurfaceView                     // full-screen module view
 )
 
 // surfaceSpec is a surface's default timeout and clamp range, in ms.
@@ -160,6 +173,7 @@ var surfaceSpecs = [...]surfaceSpec{
 	SurfaceTransform: {def: 2000, min: 200, max: 10000},
 	SurfacePreview:   {def: 3000, min: 200, max: 10000},
 	SurfaceSegment:   {def: 4000, min: 500, max: 4000},
+	SurfaceView:      {def: 8000, min: 500, max: 30000},
 }
 
 // ResolveTimeout resolves a handler's effective timeout: the handler-level
@@ -267,6 +281,39 @@ func (m Manifest) validate() error {
 		// the pace, and the exit code is the verdict.
 		if err := validateCommand(m.PreLaunch.Command); err != nil {
 			return fmt.Errorf("preLaunch: %v", err)
+		}
+	}
+	if len(m.Views) > 8 {
+		return fmt.Errorf("%d views declared, max 8", len(m.Views))
+	}
+	vids := map[string]bool{}
+	vkeys := map[string]bool{}
+	for i, v := range m.Views {
+		where := fmt.Sprintf("views[%d]", i)
+		if v.ID != "" {
+			where = fmt.Sprintf("view %q", v.ID)
+		}
+		if !nameCharset(v.ID) {
+			return fmt.Errorf("%s: invalid id (want ^[a-z0-9][a-z0-9._-]{0,63}$)", where)
+		}
+		if vids[v.ID] {
+			return fmt.Errorf("%s: duplicate id", where)
+		}
+		vids[v.ID] = true
+		if err := validKey(v.Key); err != nil {
+			return fmt.Errorf("%s: %v", where, err)
+		}
+		// Views open from the missions screen and share its key space with
+		// this module's own missions actions.
+		if vkeys[v.Key] || keys[v.Key] {
+			return fmt.Errorf("%s: duplicate key %q", where, v.Key)
+		}
+		vkeys[v.Key] = true
+		if v.Title == "" || utf8.RuneCountInString(v.Title) > 40 {
+			return fmt.Errorf("%s: title must be 1-40 runes", where)
+		}
+		if err := validateCommand(v.Command); err != nil {
+			return fmt.Errorf("%s: %v", where, err)
 		}
 	}
 	return nil

@@ -154,6 +154,9 @@ func TestHelperProcess(t *testing.T) {
 		}
 		f.Close()
 		fmt.Printf(`{"text":%q}`, extra[1])
+	case "view":
+		io.Copy(io.Discard, os.Stdin)
+		fmt.Print(`{"title":"My Page","body":"line1\nline2 with \u001b[31mansi\u001b[0m"}`)
 	case "seg-sleep":
 		ms, _ := strconv.Atoi(extra[0])
 		io.Copy(io.Discard, os.Stdin)

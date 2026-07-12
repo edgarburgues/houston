@@ -107,6 +107,12 @@ func RunTest(name string, opts TestOpts) int {
 		record(runHandlerTest(w, m, "statusline", EventSegment, s.Command, struct{}{},
 			m.Manifest.ResolveTimeout(SurfaceSegment, s.TimeoutMs), CapSegment, nil))
 	}
+	if event == "" || event == EventView {
+		for _, v := range m.Manifest.Views {
+			record(runHandlerTest(w, m, "view "+v.ID, EventView, v.Command, ViewPayload{View: v.ID},
+				m.Manifest.ResolveTimeout(SurfaceView, v.TimeoutMs), CapReply, nil))
+		}
+	}
 	if h := m.Manifest.PreLaunch; h != nil && (event == "" || event == EventPreLaunch) {
 		// Shaped like a resume launch (mission only), with the documented
 		// harness marker so hooks can tell a test run apart.
@@ -146,6 +152,8 @@ func canonicalEvent(e string) (string, error) {
 		return EventSegment, nil
 	case EventPreLaunch, "prelaunch", "preLaunch", "launch":
 		return EventPreLaunch, nil
+	case EventView, "view", "views":
+		return EventView, nil
 	}
 	return "", fmt.Errorf("unknown event %q (want action.invoke, missions.transform, preview.append, statusline.segment or launch.before)", e)
 }
