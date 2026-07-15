@@ -153,10 +153,12 @@ type Model struct {
 	// next d/x press confirms. Any other key disarms it.
 	pendingDelete string
 
-	// module views (modviews.go): key dispatch map, the view currently on
-	// screen and every view's retained state (viewport, title, generation).
+	// module views (modviews.go): key dispatch map, ALL views by id (for
+	// "opens" navigation), the navigation stack of the visible page and
+	// every instance's retained state (viewport, title, generation).
 	modViews map[string]moduleViewRef
-	mvRef    moduleViewRef
+	mvAll    map[string]moduleViewRef
+	mvStack  []viewInstance
 	mvStates map[string]*modViewState
 
 	// pending is a claude launch parked while its pre-launch hooks run
@@ -210,9 +212,10 @@ func New(root string, rescan func() ([]model.Mission, error), st *store.Store, m
 	if hasTransforms(mods) {
 		m.initXform = transformCmd(ctx, mods, m.xformGen, module.ProjectRows(m.missions, st))
 	}
-	refs, accepted, vrefs, vaccepted, actionWarns := buildModContribs(mods)
+	refs, accepted, vrefs, vaccepted, vall, actionWarns := buildModContribs(mods)
 	m.modActions = refs
 	m.modViews = vrefs
+	m.mvAll = vall
 	// The command registry: core bindings plus the surviving module actions
 	// and views. The ? overlay and the footer hints render from it, so a
 	// dropped contribution can never be advertised.
@@ -1026,7 +1029,7 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.act == actViewFilter {
 		// Rows-view filter applies live, like search; the cursor snaps back
 		// to the best (first) match when the visible set changes.
-		st := m.ensureViewState(m.mvRef)
+		st := m.ensureViewState(m.mvTop())
 		st.filter = m.input.Value()
 		st.cur = 0
 	}

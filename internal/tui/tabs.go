@@ -162,9 +162,9 @@ func (m Model) switchTab(n int) (tea.Model, tea.Cmd) {
 		m.ntScroll = 0
 	case tabModView:
 		m.screen = screenModuleView
-		m.mvRef = t.ref
+		m.mvStack = []viewInstance{{ref: t.ref}}
 		m.seedViewHint()
-		return m, m.viewFetchCmd(t.ref)
+		return m, m.viewFetchCmd(m.mvTop())
 	}
 	return m, nil
 }

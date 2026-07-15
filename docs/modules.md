@@ -381,6 +381,28 @@ true }` — except that `refresh` re-renders the VIEW, not the mission list.
 `$HOUSTON_EVENT_FILE`, exit code as the only protocol, exactly like
 interactive missions actions.
 
+### Navigation: opens and internal views
+
+A page action may declare `opens` instead of running a handler:
+
+```json
+"actions": [{ "id": "detail", "key": "enter", "title": "open issue", "opens": "issue" }]
+```
+
+Pressing the key pushes the named view of the SAME module as a sub-page,
+with the selected (filtered) row as its navigation context: the sub-page's
+`view.render` receives it as `payload.row` and renders the page FOR that
+row. No handler runs for the navigation itself. `esc` pops back to the
+parent (the list keeps its cursor and filter); from the root it leaves the
+module view. Each (view, row) pair retains its own state, and a sub-page's
+own actions act on the context row: comment-from-the-detail-page with
+`refreshAfter` re-renders the page, so the new comment shows immediately.
+
+A view declared WITHOUT a `key` is internal: it lives outside the missions
+key space and is reachable only through another view's `opens`. Internal
+views cannot be tabs. `opens` and `interactive` are mutually exclusive, and
+the target must be a view id of the same module (validated at parse).
+
 ### `launch.before`
 
 Modules with a `preLaunch` handler run **interactively, before claude gets

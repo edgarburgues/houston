@@ -846,16 +846,19 @@ func shadowedKeys(mods []module.Module) []string {
 			if v.Tab {
 				what = "tab view"
 			}
-			if tui.BuiltinMissionsKeys[v.Key] {
-				out = append(out, fmt.Sprintf("%s: %s %q key %q is shadowed by a built-in key", m.Name, what, v.ID, v.Key))
-				continue
+			// Internal views (no key) live outside the missions key space.
+			if v.Key != "" {
+				if tui.BuiltinMissionsKeys[v.Key] {
+					out = append(out, fmt.Sprintf("%s: %s %q key %q is shadowed by a built-in key", m.Name, what, v.ID, v.Key))
+					continue
+				}
+				k := "missions:" + v.Key
+				if by, taken := claimed[k]; taken {
+					out = append(out, fmt.Sprintf("%s: %s %q key %q is shadowed by module %s", m.Name, what, v.ID, v.Key, by))
+					continue
+				}
+				claimed[k] = m.Name
 			}
-			k := "missions:" + v.Key
-			if by, taken := claimed[k]; taken {
-				out = append(out, fmt.Sprintf("%s: %s %q key %q is shadowed by module %s", m.Name, what, v.ID, v.Key, by))
-				continue
-			}
-			claimed[k] = m.Name
 			// Page actions are pruned by the TUI against the view page's own
 			// keys — mirror that here or doctor gives a false all-clear on a
 			// dead binding.

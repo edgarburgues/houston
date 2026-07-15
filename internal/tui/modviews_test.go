@@ -39,7 +39,7 @@ func TestBuildModContribsViewConflicts(t *testing.T) {
 			Actions: []module.Action{{ID: "late", Key: "I", Title: "t", Screen: "missions"}},
 		}},
 	}
-	arefs, _, vrefs, vaccepted, warns := buildModContribs(mods)
+	arefs, _, vrefs, vaccepted, _, warns := buildModContribs(mods)
 	if len(vaccepted) != 1 || vaccepted[0].mod.Name != "c-mod" {
 		t.Fatalf("accepted views: %+v", vaccepted)
 	}
@@ -62,7 +62,7 @@ func TestBuildModContribsPrunesViewActionKeys(t *testing.T) {
 		{ID: "bad-global", Key: "5", Title: "t"},    // tab key: dropped
 		{ID: "comment", Key: "c", Title: "comment"}, // fine
 	}
-	_, _, _, vaccepted, warns := buildModContribs([]module.Module{mod})
+	_, _, _, vaccepted, _, warns := buildModContribs([]module.Module{mod})
 	if len(vaccepted) != 1 {
 		t.Fatalf("view should survive: %v", warns)
 	}
@@ -158,7 +158,7 @@ func TestRowsViewNavigationFilterAndActions(t *testing.T) {
 	m := newModelMods(t, rowsModule())
 	tm, _ := m.Update(runes("I"))
 	m = tm.(Model)
-	ref := m.mvRef
+	ref := m.mvTop().ref
 	st := m.mvStates[viewKey(ref)]
 	// Before the first render lands there is nothing to act on: the page
 	// action must no-op instead of dispatching a body-shaped payload.
@@ -227,12 +227,12 @@ func TestViewActMsgRefreshRerendersView(t *testing.T) {
 	m := newModelMods(t, rowsModule())
 	tm, _ := m.Update(runes("I"))
 	m = tm.(Model)
-	ref := m.mvRef
+	ref := m.mvTop().ref
 	st := m.mvStates[viewKey(ref)]
 	st.inflight = false
 	before := st.gen
 
-	tm, cmd := m.Update(viewActMsg{ref: ref, id: "open", refresh: true})
+	tm, cmd := m.Update(viewActMsg{in: viewInstance{ref: ref}, id: "open", refresh: true})
 	m = tm.(Model)
 	if cmd == nil || st.gen != before+1 || !st.inflight {
 		t.Fatalf("a refreshing action must re-render the view: gen=%d inflight=%v", st.gen, st.inflight)
@@ -242,7 +242,7 @@ func TestViewActMsgRefreshRerendersView(t *testing.T) {
 	}
 
 	// Errors report and never refresh.
-	tm, cmd = m.Update(viewActMsg{ref: ref, id: "open", refresh: true, err: errors.New("boom")})
+	tm, cmd = m.Update(viewActMsg{in: viewInstance{ref: ref}, id: "open", refresh: true, err: errors.New("boom")})
 	m = tm.(Model)
 	if cmd != nil || !strings.Contains(m.status, "boom") {
 		t.Fatalf("a failed action must not refresh: cmd=%v status=%q", cmd, m.status)
@@ -264,13 +264,13 @@ func TestViewStatusAndFooterIntegrity(t *testing.T) {
 	m := newModelMods(t, mod)
 	tm, _ := m.Update(runes("I"))
 	m = tm.(Model)
-	ref := m.mvRef
+	ref := m.mvTop().ref
 	st := m.mvStates[viewKey(ref)]
 	tm, _ = m.Update(modViewMsg{gen: st.gen, mod: "jira", id: "list", title: "Issues (1)", rows: []module.ViewRow{{ID: "A-1", Text: "A-1 alpha"}}})
 	m = tm.(Model)
 
 	// A view action outcome must be visible in the view's own frame.
-	tm, _ = m.Update(viewActMsg{ref: ref, id: "open", status: "opened A-1"})
+	tm, _ = m.Update(viewActMsg{in: viewInstance{ref: ref}, id: "open", status: "opened A-1"})
 	m = tm.(Model)
 	if !strings.Contains(m.View(), "[jira] opened A-1") {
 		t.Fatal("the view frame must show the action outcome")
@@ -313,10 +313,84 @@ func TestClipCellsBudgetsDisplayWidth(t *testing.T) {
 	m := newModelMods(t, rowsModule())
 	tm, _ := m.Update(runes("I"))
 	m = tm.(Model)
-	st := m.mvStates[viewKey(m.mvRef)]
+	st := m.mvStates[viewKey(m.mvTop().ref)]
 	tm, _ = m.Update(modViewMsg{gen: st.gen, mod: "jira", id: "list", title: "W", rows: []module.ViewRow{{ID: "w", Text: wide}}})
 	m = tm.(Model)
 	if got := len(strings.Split(m.View(), "\n")); got != m.height {
 		t.Fatalf("wide rows must not grow the frame: %d lines for height %d", got, m.height)
+	}
+}
+
+// TestOpensNavigationPushPop: an "opens" action pushes the target view with
+// the selected row as context (no handler runs for the navigation itself —
+// the fetch is a normal render with payload.row), and esc pops back to the
+// list instead of leaving the module view.
+func TestOpensNavigationPushPop(t *testing.T) {
+	t.Setenv("HOUSTON_HOME", t.TempDir())
+	mod := module.Module{
+		Entry: module.Entry{Name: "jira", Enabled: true},
+		Manifest: module.Manifest{
+			API: 1, Name: "jira",
+			Views: []module.View{
+				{ID: "list", Key: "I", Title: "Issues", Command: []string{"cmd"},
+					Actions: []module.ViewAction{{ID: "detail", Key: "enter", Title: "detail", Opens: "issue"}}},
+				{ID: "issue", Title: "Issue", Command: []string{"cmd"},
+					Actions: []module.ViewAction{{ID: "comment", Key: "c", Title: "comment", RefreshAfter: true}}},
+			},
+		},
+		Dir: ".",
+	}
+	m := newModelMods(t, mod)
+	tm, _ := m.Update(runes("I"))
+	m = tm.(Model)
+	root := m.mvTop()
+	st := m.ensureViewState(root)
+	tm, _ = m.Update(modViewMsg{gen: st.gen, skey: instKey(root), mod: "jira", id: "list", title: "Issues (2)", rows: []module.ViewRow{
+		{ID: "A-1", Text: "A-1 alpha"}, {ID: "B-2", Text: "B-2 beta"},
+	}})
+	m = tm.(Model)
+
+	// enter pushes the detail view for the selected row and fetches it.
+	m = drive(m, runes("j"))
+	tm, cmd := m.updateModuleViewKeys(key(tea.KeyEnter))
+	m = tm.(Model)
+	if len(m.mvStack) != 2 || cmd == nil {
+		t.Fatalf("opens must push and fetch: stack=%d cmd=%v", len(m.mvStack), cmd)
+	}
+	top := m.mvTop()
+	if top.ref.view.ID != "issue" || top.row == nil || top.row.ID != "B-2" {
+		t.Fatalf("the pushed instance must carry the selected row: %+v", top)
+	}
+	if instKey(top) != "jira/issue#B-2" {
+		t.Fatalf("instance state key: %q", instKey(top))
+	}
+
+	// The detail body lands; its page action acts on the CONTEXT row.
+	dst := m.ensureViewState(top)
+	tm, _ = m.Update(modViewMsg{gen: dst.gen, skey: instKey(top), mod: "jira", id: "issue", title: "B-2", body: "detail body"})
+	m = tm.(Model)
+	if !dst.loaded {
+		t.Fatal("detail render must land in the instance state")
+	}
+	tm, cmd = m.updateModuleViewKeys(runes("c"))
+	m = tm.(Model)
+	if cmd == nil || !strings.Contains(m.status, "[jira] comment") {
+		t.Fatalf("a context action must dispatch: %q", m.status)
+	}
+
+	// esc pops back to the list, which kept its rows and cursor.
+	tm, _ = m.updateModuleViewKeys(key(tea.KeyEsc))
+	m = tm.(Model)
+	if len(m.mvStack) != 1 || m.mvTop().ref.view.ID != "list" || m.screen != screenModuleView {
+		t.Fatalf("esc must pop to the list: stack=%d", len(m.mvStack))
+	}
+	if st.cur != 1 {
+		t.Fatalf("the list cursor must survive the round trip, got %d", st.cur)
+	}
+	// esc from the root leaves to Missions.
+	tm, _ = m.updateModuleViewKeys(key(tea.KeyEsc))
+	m = tm.(Model)
+	if m.screen != screenMissions {
+		t.Fatal("esc from the root must go home")
 	}
 }

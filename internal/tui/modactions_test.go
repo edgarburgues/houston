@@ -118,7 +118,7 @@ func TestBuildModContribsActionConflicts(t *testing.T) {
 		module.Action{ID: "dropped-shadowed", Key: "J", Title: "loses to aaa", Screen: "missions"},
 		module.Action{ID: "ok", Key: "J", Title: "distinct screen is fine", Screen: "accounts"},
 	)
-	refs, accepted, _, _, warns := buildModContribs([]module.Module{amod, bmod})
+	refs, accepted, _, _, _, warns := buildModContribs([]module.Module{amod, bmod})
 	if len(refs) != 2 || len(accepted) != 2 {
 		t.Fatalf("want 2 surviving actions, got refs=%d accepted=%d (warns=%v)", len(refs), len(accepted), warns)
 	}

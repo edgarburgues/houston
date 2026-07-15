@@ -116,6 +116,10 @@ func RunTest(name string, opts TestOpts) int {
 	if event == "" || event == EventViewInvoke {
 		for _, v := range m.Manifest.Views {
 			for _, va := range v.Actions {
+				if va.Opens != "" {
+					fmt.Fprintf(w, "\n=== view %s action %s (key %s) -> navigation only (opens view %q), no handler runs\n", v.ID, va.ID, va.Key, va.Opens)
+					continue
+				}
 				record(runViewActionTest(w, m, v, va))
 			}
 		}

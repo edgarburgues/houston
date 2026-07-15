@@ -105,7 +105,7 @@ func TestPalettePageActionsAndSelectionStability(t *testing.T) {
 	// On the view's page, its actions are findable and runnable.
 	tm, _ := m.Update(runes("I"))
 	m = tm.(Model)
-	st := m.mvStates[viewKey(m.mvRef)]
+	st := m.mvStates[viewKey(m.mvTop().ref)]
 	tm, _ = m.Update(modViewMsg{gen: st.gen, mod: "jira", id: "list", title: "Issues (1)", rows: []module.ViewRow{{ID: "A-1", Text: "A-1 alpha"}}})
 	m = tm.(Model)
 	m = drive(m, runes(":"))

@@ -169,6 +169,10 @@ type PreLaunchPayload struct {
 // mission on purpose.
 type ViewPayload struct {
 	View string `json:"view"`
+	// Row is the navigation context when the view was opened by another
+	// view's "opens" action (null for root views): the handler renders the
+	// page FOR that row.
+	Row *ViewRow `json:"row"`
 }
 
 // ViewRow is one selectable line of a rows view: id is what view.invoke
@@ -208,8 +212,8 @@ const (
 // reply with rows becomes an interactive list (each row one sanitized line;
 // the body is dropped); otherwise the body is the page, plain text with
 // newlines kept.
-func RunView(ctx context.Context, m Module, v View) (string, string, []ViewRow, error) {
-	env := NewEnvelope(EventView, m, ViewPayload{View: v.ID})
+func RunView(ctx context.Context, m Module, v View, row *ViewRow) (string, string, []ViewRow, error) {
+	env := NewEnvelope(EventView, m, ViewPayload{View: v.ID, Row: row})
 	raw, err := Invoke(ctx, m, v.Command, env, CapReply, m.Manifest.ResolveTimeout(SurfaceView, v.TimeoutMs))
 	if err != nil {
 		return "", "", nil, err

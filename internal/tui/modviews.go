@@ -35,6 +35,23 @@ type moduleViewRef struct {
 // viewKey identifies a view's retained state across renders and tabs.
 func viewKey(ref moduleViewRef) string { return ref.mod.Name + "/" + ref.view.ID }
 
+// viewInstance is one entry of the navigation stack: a view plus the row
+// context it was opened FOR (nil on root views). "opens" actions push
+// instances; esc pops.
+type viewInstance struct {
+	ref moduleViewRef
+	row *module.ViewRow
+}
+
+// instKey identifies an instance's retained state: the same detail view
+// opened for two different rows is two states.
+func instKey(in viewInstance) string {
+	if in.row != nil && in.row.ID != "" {
+		return viewKey(in.ref) + "#" + in.row.ID
+	}
+	return viewKey(in.ref)
+}
+
 // modViewState is one view's retained screen state. Held by pointer in
 // Model.mvStates: Bubble Tea copies the model by value on every Update and
 // the state must survive those copies.
@@ -70,9 +87,11 @@ func filteredIdx(st *modViewState) []int {
 	return out
 }
 
-// modViewMsg carries one finished view render.
+// modViewMsg carries one finished view render. skey is the instance state
+// key; when empty (older tests) it derives from mod/id, the root form.
 type modViewMsg struct {
 	gen         int
+	skey        string
 	mod, id     string
 	title, body string
 	rows        []module.ViewRow
@@ -81,7 +100,7 @@ type modViewMsg struct {
 
 // viewActMsg reports a view action's outcome (view.invoke) back to Update.
 type viewActMsg struct {
-	ref     moduleViewRef
+	in      viewInstance
 	id      string
 	status  string
 	refresh bool
@@ -94,9 +113,10 @@ type viewActMsg struct {
 // class — the documented first-claimant rule, with no action-beats-view
 // asymmetry. Built-ins (tab keys included) always win. Each accepted view
 // also gets its page actions pruned against the view screen's own keys.
-func buildModContribs(mods []module.Module) (map[string]moduleActionRef, []moduleActionRef, map[string]moduleViewRef, []moduleViewRef, []string) {
+func buildModContribs(mods []module.Module) (map[string]moduleActionRef, []moduleActionRef, map[string]moduleViewRef, []moduleViewRef, map[string]moduleViewRef, []string) {
 	actions := map[string]moduleActionRef{}
 	views := map[string]moduleViewRef{}
+	all := map[string]moduleViewRef{} // every accepted view (internal too), for "opens" navigation
 	var accActs []moduleActionRef
 	var accViews []moduleViewRef
 	var warns []string
@@ -123,16 +143,20 @@ func buildModContribs(mods []module.Module) (map[string]moduleActionRef, []modul
 			accActs = append(accActs, ref)
 		}
 		for _, v := range mod.Manifest.Views {
-			if BuiltinMissionsKeys[v.Key] {
-				warns = append(warns, fmt.Sprintf("[%s] view %s dropped: %q is a built-in missions key", mod.Name, v.ID, v.Key))
-				continue
+			// Internal views (no key) skip the missions key space entirely:
+			// they are reachable only through another view's "opens" action.
+			if v.Key != "" {
+				if BuiltinMissionsKeys[v.Key] {
+					warns = append(warns, fmt.Sprintf("[%s] view %s dropped: %q is a built-in missions key", mod.Name, v.ID, v.Key))
+					continue
+				}
+				ck := "missions:" + v.Key
+				if owner := claimed[ck]; owner != "" {
+					warns = append(warns, fmt.Sprintf("[%s] view %s dropped: key %q already claimed by module %s", mod.Name, v.ID, v.Key, owner))
+					continue
+				}
+				claimed[ck] = mod.Name
 			}
-			ck := "missions:" + v.Key
-			if owner := claimed[ck]; owner != "" {
-				warns = append(warns, fmt.Sprintf("[%s] view %s dropped: key %q already claimed by module %s", mod.Name, v.ID, v.Key, owner))
-				continue
-			}
-			claimed[ck] = mod.Name
 			var kept []module.ViewAction
 			for _, va := range v.Actions {
 				if pageKeys[va.Key] {
@@ -143,21 +167,24 @@ func buildModContribs(mods []module.Module) (map[string]moduleActionRef, []modul
 			}
 			v.Actions = kept
 			ref := moduleViewRef{mod: mod, view: v}
-			views[ck] = ref
-			accViews = append(accViews, ref)
+			all[mod.Name+"/"+v.ID] = ref
+			if v.Key != "" {
+				views["missions:"+v.Key] = ref
+				accViews = append(accViews, ref)
+			}
 		}
 	}
-	return actions, accActs, views, accViews, warns
+	return actions, accActs, views, accViews, all, warns
 }
 
 // ensureViewState returns the view's retained state, creating it (and the
 // map, for bare test models) on first use. Pointer receiver: callers hold
 // the model copy the assignment must land on.
-func (m *Model) ensureViewState(ref moduleViewRef) *modViewState {
+func (m *Model) ensureViewState(in viewInstance) *modViewState {
 	if m.mvStates == nil {
 		m.mvStates = map[string]*modViewState{}
 	}
-	k := viewKey(ref)
+	k := instKey(in)
 	st, ok := m.mvStates[k]
 	if !ok {
 		st = &modViewState{vp: viewport.New(m.width-4, m.bodyH()-2)}
@@ -166,18 +193,27 @@ func (m *Model) ensureViewState(ref moduleViewRef) *modViewState {
 	return st
 }
 
+// mvTop is the visible view instance (zero value when no stack — callers on
+// the module-view screen always have one).
+func (m Model) mvTop() viewInstance {
+	if n := len(m.mvStack); n > 0 {
+		return m.mvStack[n-1]
+	}
+	return viewInstance{}
+}
+
 // viewFetchCmd dispatches a render for the view unless its retained state is
 // already loaded or in flight. Callers own the screen/tab bookkeeping.
-func (m *Model) viewFetchCmd(ref moduleViewRef) tea.Cmd {
-	st := m.ensureViewState(ref)
+func (m *Model) viewFetchCmd(in viewInstance) tea.Cmd {
+	st := m.ensureViewState(in)
 	if st.loaded || st.inflight {
 		return nil
 	}
 	st.gen++
 	st.inflight = true
-	st.vp.SetContent(dimStyle.Render("loading " + ref.view.Title + "…"))
+	st.vp.SetContent(dimStyle.Render("loading " + in.ref.view.Title + "…"))
 	st.vp.GotoTop()
-	return renderViewCmd(m.modCtx, ref, st.gen)
+	return renderViewCmd(m.modCtx, in, st.gen)
 }
 
 // openModuleView shows a view: promoted views jump to their tab, the rest
@@ -188,22 +224,23 @@ func (m Model) openModuleView(ref moduleViewRef) (tea.Model, tea.Cmd) {
 		return m.switchTab(idx)
 	}
 	m.screen = screenModuleView
-	m.mvRef = ref
+	m.mvStack = []viewInstance{{ref: ref}}
 	m.seedViewHint()
-	return m, m.viewFetchCmd(ref)
+	return m, m.viewFetchCmd(m.mvTop())
 }
 
 // renderViewCmd fetches one view render off the event loop; recovers like
 // every module goroutine.
-func renderViewCmd(ctx context.Context, ref moduleViewRef, gen int) tea.Cmd {
+func renderViewCmd(ctx context.Context, in viewInstance, gen int) tea.Cmd {
+	ref, skey := in.ref, instKey(in)
 	return func() (msg tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
-				msg = modViewMsg{gen: gen, mod: ref.mod.Name, id: ref.view.ID, err: fmt.Errorf("panic: %v", r)}
+				msg = modViewMsg{gen: gen, skey: skey, mod: ref.mod.Name, id: ref.view.ID, err: fmt.Errorf("panic: %v", r)}
 			}
 		}()
-		title, body, rows, err := module.RunView(ctx, ref.mod, ref.view)
-		return modViewMsg{gen: gen, mod: ref.mod.Name, id: ref.view.ID, title: title, body: body, rows: rows, err: err}
+		title, body, rows, err := module.RunView(ctx, ref.mod, ref.view, in.row)
+		return modViewMsg{gen: gen, skey: skey, mod: ref.mod.Name, id: ref.view.ID, title: title, body: body, rows: rows, err: err}
 	}
 }
 
@@ -212,7 +249,10 @@ func renderViewCmd(ctx context.Context, ref moduleViewRef, gen int) tea.Cmd {
 // missions tab with the footer notice; one on a background view keeps its
 // state unloaded (the next activation retries) and still notes the failure.
 func (m Model) onModViewMsg(msg modViewMsg) (tea.Model, tea.Cmd) {
-	key := msg.mod + "/" + msg.id
+	key := msg.skey
+	if key == "" {
+		key = msg.mod + "/" + msg.id
+	}
 	st, ok := m.mvStates[key]
 	if !ok || msg.gen != st.gen {
 		return m, nil
@@ -220,7 +260,7 @@ func (m Model) onModViewMsg(msg modViewMsg) (tea.Model, tea.Cmd) {
 	st.inflight = false
 	if msg.err != nil {
 		st.loaded = false
-		if m.screen == screenModuleView && viewKey(m.mvRef) == key {
+		if m.screen == screenModuleView && instKey(m.mvTop()) == key {
 			// Leaving the dead view must also close a filter input armed on
 			// it — otherwise the prompt strands over Missions, silently
 			// editing the failed view's retained filter.
@@ -230,6 +270,7 @@ func (m Model) onModViewMsg(msg modViewMsg) (tea.Model, tea.Cmd) {
 			}
 			m.screen = screenMissions
 			m.tabCur = 0
+			m.mvStack = nil
 		}
 		m.note(actionFailStatus(msg.mod, msg.id, msg.err))
 		return m, nil
@@ -237,7 +278,7 @@ func (m Model) onModViewMsg(msg modViewMsg) (tea.Model, tea.Cmd) {
 	st.loaded = true
 	st.title = msg.title
 	st.rows = msg.rows
-	if m.screen == screenModuleView && viewKey(m.mvRef) == key {
+	if m.screen == screenModuleView && instKey(m.mvTop()) == key {
 		// Content just landed on the visible view: refresh the rich hint
 		// ("/ filter" appears once rows exist, "refreshing …" retires).
 		m.seedViewHint()
@@ -264,17 +305,25 @@ func (m Model) onModViewMsg(msg modViewMsg) (tea.Model, tea.Cmd) {
 // scroll the page. Unmatched keys fall through to the view's own page
 // actions — navigation never execs, actions do.
 func (m Model) updateModuleViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	st := m.ensureViewState(m.mvRef)
+	top := m.mvTop()
+	st := m.ensureViewState(top)
 	rows := len(st.rows) > 0
 	switch msg.String() {
 	case "q", "ctrl+c":
 		m.modCancel()
 		return m, tea.Quit
 	case "esc", "backspace":
-		// esc always goes home: transient views were opened from Missions,
-		// and from a tab view home is the Missions tab.
+		// esc pops a pushed sub-page first; from the root it goes home
+		// (transient views were opened from Missions, and from a tab view
+		// home is the Missions tab).
+		if len(m.mvStack) > 1 {
+			m.mvStack = m.mvStack[:len(m.mvStack)-1]
+			m.seedViewHint()
+			return m, nil
+		}
 		m.screen = screenMissions
 		m.tabCur = 0
+		m.mvStack = nil
 		m.seedHint(scrMissions)
 		return m, nil
 	case "?":
@@ -292,8 +341,8 @@ func (m Model) updateModuleViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// says what's happening and the reply swaps the body in.
 		st.gen++
 		st.inflight = true
-		m.status = "refreshing " + m.mvRef.view.Title + "…"
-		return m, renderViewCmd(m.modCtx, m.mvRef, st.gen)
+		m.status = "refreshing " + top.ref.view.Title + "…"
+		return m, renderViewCmd(m.modCtx, top, st.gen)
 	case "up", "k":
 		if rows {
 			if st.cur > 0 {
@@ -345,13 +394,50 @@ func (m Model) updateModuleViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			st.vp.GotoBottom()
 		}
 	default:
-		for _, va := range m.mvRef.view.Actions {
+		for _, va := range top.ref.view.Actions {
 			if va.Key == msg.String() {
+				if va.Opens != "" {
+					return m.openSubView(va.Opens)
+				}
 				return m.runViewAction(va)
 			}
 		}
 	}
 	return m, nil
+}
+
+// openSubView pushes another view of the same module as a sub-page: on a
+// rows view the selected (filtered) row becomes the new page's context, on
+// a body view the current context passes through. Pure navigation — no
+// handler runs here; the fetch (if the instance has no retained render)
+// is a normal view.render with payload.row set.
+func (m Model) openSubView(id string) (tea.Model, tea.Cmd) {
+	top := m.mvTop()
+	st := m.ensureViewState(top)
+	row := top.row
+	if len(st.rows) > 0 {
+		idxs := filteredIdx(st)
+		if len(idxs) == 0 {
+			return m, nil
+		}
+		cur := st.cur
+		if cur >= len(idxs) {
+			cur = len(idxs) - 1
+		}
+		if cur < 0 {
+			cur = 0
+		}
+		r := st.rows[idxs[cur]]
+		row = &r
+	}
+	target, ok := m.mvAll[top.ref.mod.Name+"/"+id]
+	if !ok {
+		return m, nil
+	}
+	in := viewInstance{ref: target, row: row}
+	m.mvStack = append(m.mvStack, in)
+	m.seedViewHint()
+	return m, m.viewFetchCmd(in)
 }
 
 // runViewAction dispatches one page action for the visible view: rows views
@@ -363,15 +449,19 @@ func (m Model) runViewAction(va module.ViewAction) (tea.Model, tea.Cmd) {
 	if m.launchBusy() {
 		return m, nil
 	}
-	ref := m.mvRef
-	st := m.ensureViewState(ref)
+	in := m.mvTop()
+	ref := in.ref
+	st := m.ensureViewState(in)
 	if !st.loaded {
 		// Nothing rendered yet (first load in flight, or the last render
 		// failed): there is nothing to act on, and dispatching now would
 		// send a body-view-shaped payload for what may be a rows view.
 		return m, nil
 	}
-	var row *module.ViewRow
+	// Rows views act on the selected (filtered) row; body sub-pages act on
+	// their navigation context (the row they were opened FOR) — that is what
+	// makes "comment from the detail page" work.
+	row := in.row
 	if len(st.rows) > 0 {
 		idxs := filteredIdx(st)
 		if len(idxs) == 0 {
@@ -390,7 +480,7 @@ func (m Model) runViewAction(va module.ViewAction) (tea.Model, tea.Cmd) {
 	env := module.NewEnvelope(module.EventViewInvoke, ref.mod, module.ViewInvokePayload{View: ref.view.ID, Action: va.ID, Row: row})
 	m.status = "[" + ref.mod.Name + "] " + va.ID + "…"
 	if !va.Interactive {
-		return m, runViewActionCmd(m.modCtx, ref, va, env)
+		return m, runViewActionCmd(m.modCtx, in, va, env)
 	}
 	cmd, cleanup, err := module.ExecViewAction(ref.mod, ref.view, env)
 	if err != nil {
@@ -403,26 +493,26 @@ func (m Model) runViewAction(va module.ViewAction) (tea.Model, tea.Cmd) {
 		cleanup()
 		if err != nil {
 			module.LogEvent(ref.mod.Name, module.EventViewInvoke, "interactive: "+err.Error(), nil)
-			return viewActMsg{ref: ref, id: id, err: err}
+			return viewActMsg{in: in, id: id, err: err}
 		}
-		return viewActMsg{ref: ref, id: id, refresh: refresh}
+		return viewActMsg{in: in, id: id, refresh: refresh}
 	})
 }
 
 // runViewActionCmd runs a non-interactive view action off the event loop;
 // recovers like every module goroutine.
-func runViewActionCmd(ctx context.Context, ref moduleViewRef, va module.ViewAction, env module.Envelope) tea.Cmd {
+func runViewActionCmd(ctx context.Context, in viewInstance, va module.ViewAction, env module.Envelope) tea.Cmd {
 	return func() (msg tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
-				msg = viewActMsg{ref: ref, id: va.ID, err: fmt.Errorf("panic: %v", r)}
+				msg = viewActMsg{in: in, id: va.ID, err: fmt.Errorf("panic: %v", r)}
 			}
 		}()
-		rep, err := module.RunViewAction(ctx, ref.mod, ref.view, va, env)
+		rep, err := module.RunViewAction(ctx, in.ref.mod, in.ref.view, va, env)
 		if err != nil {
-			return viewActMsg{ref: ref, id: va.ID, err: err}
+			return viewActMsg{in: in, id: va.ID, err: err}
 		}
-		return viewActMsg{ref: ref, id: va.ID, status: rep.Status, refresh: rep.Refresh}
+		return viewActMsg{in: in, id: va.ID, status: rep.Status, refresh: rep.Refresh}
 	}
 }
 
@@ -432,30 +522,31 @@ func runViewActionCmd(ctx context.Context, ref moduleViewRef, va module.ViewActi
 func (m Model) onViewActMsg(msg viewActMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case msg.err != nil:
-		m.note(actionFailStatus(msg.ref.mod.Name, msg.id, msg.err))
+		m.note(actionFailStatus(msg.in.ref.mod.Name, msg.id, msg.err))
 	case msg.status != "":
-		m.note("[" + msg.ref.mod.Name + "] " + msg.status)
+		m.note("[" + msg.in.ref.mod.Name + "] " + msg.status)
 	default:
-		m.note("[" + msg.ref.mod.Name + "] " + msg.id + " done")
+		m.note("[" + msg.in.ref.mod.Name + "] " + msg.id + " done")
 	}
 	if msg.err != nil || !msg.refresh {
 		return m, nil
 	}
-	st := m.ensureViewState(msg.ref)
+	st := m.ensureViewState(msg.in)
 	st.gen++
 	st.inflight = true
-	return m, renderViewCmd(m.modCtx, msg.ref, st.gen)
+	return m, renderViewCmd(m.modCtx, msg.in, st.gen)
 }
 
 // viewFooterHint is the page footer: the view's own actions first (plus the
 // / filter on rows views), then the core hint.
 func (m Model) viewFooterHint() string {
 	base := hintFor(m.registry, scrModView)
+	top := m.mvTop()
 	var parts []string
-	for _, va := range m.mvRef.view.Actions {
+	for _, va := range top.ref.view.Actions {
 		parts = append(parts, keyLabel(va.Key)+" "+va.Title)
 	}
-	if st := m.mvStates[viewKey(m.mvRef)]; st != nil && len(st.rows) > 0 {
+	if st := m.mvStates[instKey(top)]; st != nil && len(st.rows) > 0 {
 		parts = append(parts, "/ filter")
 	}
 	if len(parts) == 0 {
@@ -470,11 +561,12 @@ func (m Model) viewActionCommands() []command {
 	if m.screen != screenModuleView {
 		return nil
 	}
+	top := m.mvTop()
 	var out []command
-	for _, va := range m.mvRef.view.Actions {
+	for _, va := range top.ref.view.Actions {
 		out = append(out, command{
 			keys: []string{va.Key}, label: keyLabel(va.Key), title: va.Title,
-			screen: scrModView, category: m.mvRef.mod.Name, origin: originModule, module: m.mvRef.mod.Name,
+			screen: scrModView, category: top.ref.mod.Name, origin: originModule, module: top.ref.mod.Name,
 		})
 	}
 	return out
@@ -484,16 +576,21 @@ func (m Model) viewActionCommands() []command {
 // title bar when transient; a cursor list for rows views or the scrollable
 // body; the action-aware hint footer.
 func (m Model) viewModuleView() string {
-	st := m.mvStates[viewKey(m.mvRef)]
-	title := m.mvRef.view.Title
+	top := m.mvTop()
+	st := m.mvStates[instKey(top)]
+	title := top.ref.view.Title
 	if st != nil && st.title != "" {
 		title = st.title
 	}
+	// Sub-pages carry a breadcrumb back to their root.
+	if len(m.mvStack) > 1 {
+		title = m.mvStack[0].ref.view.Title + " › " + title
+	}
 	var header string
-	if _, ok := m.tabIdx[viewKey(m.mvRef)]; ok {
-		header = m.viewTabBar(m.mvRef.mod.Name)
+	if _, ok := m.tabIdx[viewKey(m.mvStack[0].ref)]; len(m.mvStack) > 0 && ok && len(m.mvStack) == 1 {
+		header = m.viewTabBar(top.ref.mod.Name)
 	} else {
-		header = headerStyle.Width(m.width).Render("▤ " + title + "  · " + m.mvRef.mod.Name)
+		header = headerStyle.Width(m.width).Render("▤ " + title + "  · " + top.ref.mod.Name)
 	}
 	h := m.bodyH() - 2
 	w := m.width - 4

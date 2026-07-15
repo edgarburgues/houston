@@ -171,6 +171,11 @@ type ViewAction struct {
 	Interactive  bool   `json:"interactive"`
 	RefreshAfter bool   `json:"refreshAfter"`
 	TimeoutMs    int    `json:"timeoutMs"`
+	// Opens navigates instead of exec'ing: pressing the key pushes the named
+	// view of the SAME module as a sub-page, with the selected row as its
+	// context (view.render receives it as payload.row); esc pops back. No
+	// handler runs for the navigation itself.
+	Opens string `json:"opens"`
 }
 
 // Surface identifies which per-surface timeout default and clamp applies to
@@ -320,15 +325,21 @@ func (m Manifest) validate() error {
 			return fmt.Errorf("%s: duplicate id", where)
 		}
 		vids[v.ID] = true
-		if err := validKey(v.Key); err != nil {
-			return fmt.Errorf("%s: %v", where, err)
+		// An empty key makes the view INTERNAL: unreachable from the missions
+		// screen, only navigated to by another view's "opens" action.
+		if v.Key != "" {
+			if err := validKey(v.Key); err != nil {
+				return fmt.Errorf("%s: %v", where, err)
+			}
+			// Views open from the missions screen and share its key space
+			// with this module's own missions actions.
+			if vkeys[v.Key] || keys[v.Key] {
+				return fmt.Errorf("%s: duplicate key %q", where, v.Key)
+			}
+			vkeys[v.Key] = true
+		} else if v.Tab {
+			return fmt.Errorf("%s: an internal view (no key) cannot be a tab", where)
 		}
-		// Views open from the missions screen and share its key space with
-		// this module's own missions actions.
-		if vkeys[v.Key] || keys[v.Key] {
-			return fmt.Errorf("%s: duplicate key %q", where, v.Key)
-		}
-		vkeys[v.Key] = true
 		if v.Title == "" || utf8.RuneCountInString(v.Title) > 40 {
 			return fmt.Errorf("%s: title must be 1-40 runes", where)
 		}
@@ -365,6 +376,17 @@ func (m Manifest) validate() error {
 			akeys[va.Key] = true
 			if va.Title == "" || utf8.RuneCountInString(va.Title) > 40 {
 				return fmt.Errorf("%s: title must be 1-40 runes", w2)
+			}
+			if va.Opens != "" && va.Interactive {
+				return fmt.Errorf("%s: opens and interactive are mutually exclusive", w2)
+			}
+		}
+	}
+	// opens targets resolve after all view ids are known.
+	for _, v := range m.Views {
+		for _, va := range v.Actions {
+			if va.Opens != "" && !vids[va.Opens] {
+				return fmt.Errorf("view %q action %q: opens unknown view %q", v.ID, va.ID, va.Opens)
 			}
 		}
 	}
