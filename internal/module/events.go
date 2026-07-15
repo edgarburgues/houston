@@ -195,6 +195,7 @@ type ViewInvokePayload struct {
 type viewReply struct {
 	Title  string    `json:"title"`
 	Body   string    `json:"body"`
+	Header string    `json:"header"`
 	Rows   []ViewRow `json:"rows"`
 	Notice string    `json:"notice"`
 }
@@ -205,6 +206,7 @@ const (
 	maxViewBody    = 256 << 10
 	maxViewRows    = 2000
 	maxViewRowText = 300
+	maxViewHeader  = 2 << 10 // dashboard block above a rows list
 )
 
 // RunView renders one module view through the full Invoke hardening. The
@@ -212,16 +214,16 @@ const (
 // reply with rows becomes an interactive list (each row one sanitized line;
 // the body is dropped); otherwise the body is the page, plain text with
 // newlines kept.
-func RunView(ctx context.Context, m Module, v View, row *ViewRow) (string, string, []ViewRow, error) {
+func RunView(ctx context.Context, m Module, v View, row *ViewRow) (string, string, string, []ViewRow, error) {
 	env := NewEnvelope(EventView, m, ViewPayload{View: v.ID, Row: row})
 	raw, err := Invoke(ctx, m, v.Command, env, CapReply, m.Manifest.ResolveTimeout(SurfaceView, v.TimeoutMs))
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 	var rep viewReply
 	if err := DecodeReply(raw, &rep); err != nil {
 		LogEvent(m.Name, EventView, err.Error(), nil)
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 	title := CleanLine(rep.Title, 60)
 	if title == "" {
@@ -239,9 +241,12 @@ func RunView(ctx context.Context, m Module, v View, row *ViewRow) (string, strin
 		rows = append(rows, row)
 	}
 	if len(rows) > 0 {
-		return title, "", rows, nil
+		// The optional header is the rows view's dashboard block: sanitized
+		// summary lines rendered above the list, never selectable, never
+		// filtered. Body views ignore it.
+		return title, "", cleanBody(rep.Header, maxViewHeader), rows, nil
 	}
-	return title, cleanBody(rep.Body, maxViewBody), nil, nil
+	return title, cleanBody(rep.Body, maxViewBody), "", nil, nil
 }
 
 // RunViewAction execs one non-interactive view action against the view's

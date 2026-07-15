@@ -62,6 +62,7 @@ type modViewState struct {
 	loaded   bool             // a render landed; activations reuse it
 	inflight bool             // a render is being fetched; don't double-dispatch
 	rows     []module.ViewRow // rows mode when non-empty
+	header   string           // dashboard block above the rows list
 	cur      int              // cursor position within the FILTERED rows
 	filter   string           // local case-insensitive substring filter
 }
@@ -94,6 +95,7 @@ type modViewMsg struct {
 	skey        string
 	mod, id     string
 	title, body string
+	header      string
 	rows        []module.ViewRow
 	err         error
 }
@@ -239,8 +241,8 @@ func renderViewCmd(ctx context.Context, in viewInstance, gen int) tea.Cmd {
 				msg = modViewMsg{gen: gen, skey: skey, mod: ref.mod.Name, id: ref.view.ID, err: fmt.Errorf("panic: %v", r)}
 			}
 		}()
-		title, body, rows, err := module.RunView(ctx, ref.mod, ref.view, in.row)
-		return modViewMsg{gen: gen, skey: skey, mod: ref.mod.Name, id: ref.view.ID, title: title, body: body, rows: rows, err: err}
+		title, body, header, rows, err := module.RunView(ctx, ref.mod, ref.view, in.row)
+		return modViewMsg{gen: gen, skey: skey, mod: ref.mod.Name, id: ref.view.ID, title: title, body: body, header: header, rows: rows, err: err}
 	}
 }
 
@@ -278,6 +280,7 @@ func (m Model) onModViewMsg(msg modViewMsg) (tea.Model, tea.Cmd) {
 	st.loaded = true
 	st.title = msg.title
 	st.rows = msg.rows
+	st.header = msg.header
 	if m.screen == screenModuleView && instKey(m.mvTop()) == key {
 		// Content just landed on the visible view: refresh the rich hint
 		// ("/ filter" appears once rows exist, "refreshing …" retires).
@@ -606,6 +609,19 @@ func (m Model) viewModuleView() string {
 		}
 		var lines []string
 		listH := h
+		if st.header != "" {
+			// The dashboard block: at most 6 dim lines above the list, cell
+			// clipped like everything a module controls.
+			hl := strings.Split(st.header, "\n")
+			if len(hl) > 6 {
+				hl = hl[:6]
+			}
+			for _, l := range hl {
+				lines = append(lines, dimStyle.Render(clipCells(l, w)))
+			}
+			lines = append(lines, "")
+			listH -= len(hl) + 1
+		}
 		if st.filter != "" {
 			lines = append(lines, dimStyle.Render(clipCells(fmt.Sprintf("filter: %s — %d/%d (/ edits, empty clears)", st.filter, len(idxs), len(st.rows)), w)))
 			listH--

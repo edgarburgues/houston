@@ -49,7 +49,7 @@ func TestRunView(t *testing.T) {
 	m := testModule(t, "viewer")
 	v := View{ID: "page", Key: "I", Title: "Fallback", Command: helperCmd("view")}
 	m.Manifest.Views = []View{v}
-	title, body, rows, err := RunView(context.Background(), m, v, nil)
+	title, body, _, rows, err := RunView(context.Background(), m, v, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestRunViewRows(t *testing.T) {
 	m := testModule(t, "lister")
 	v := View{ID: "list", Key: "I", Title: "Fallback", Command: helperCmd("view-rows")}
 	m.Manifest.Views = []View{v}
-	title, body, rows, err := RunView(context.Background(), m, v, nil)
+	title, body, _, rows, err := RunView(context.Background(), m, v, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
