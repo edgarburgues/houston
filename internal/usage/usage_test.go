@@ -154,3 +154,27 @@ func TestLRUFirst(t *testing.T) {
 		t.Fatalf("lruFirst should pick the oldest 'c', picked %q", got.ID)
 	}
 }
+
+// TestPickBestSkipsSaturatedAccounts reproduces the real incident: an account
+// at 100% of its 5h window with the reset minutes away gets a tiny attenuated
+// pressure, but launching it walks into the session-limit wall — a currently
+// usable account must win however its pressure compares. Only when every
+// account is limited does the ranking fall back to all of them.
+func TestPickBestSkipsSaturatedAccounts(t *testing.T) {
+	probes := []Probe{
+		{Account: accounts.Account{ID: "work3"}, U5: 100, U7: 24, Pressure: 2, OK: true},
+		{Account: accounts.Account{ID: "work4"}, U5: 47, U7: 12, Pressure: 5, OK: true},
+		{Account: accounts.Account{ID: "work2"}, U5: 10, U7: 47, Pressure: 11, OK: true},
+	}
+	if got := pickBest(probes); got.ID != "work4" {
+		t.Fatalf("a saturated account must not be launched while usable ones exist, got %q", got.ID)
+	}
+	// All limited: pressure (which favors the nearest reset) decides again.
+	probes = []Probe{
+		{Account: accounts.Account{ID: "x"}, U5: 100, U7: 10, Pressure: 2, OK: true},
+		{Account: accounts.Account{ID: "y"}, U5: 96, U7: 20, Pressure: 40, OK: true},
+	}
+	if got := pickBest(probes); got.ID != "x" {
+		t.Fatalf("with every account limited the lowest pressure wins, got %q", got.ID)
+	}
+}

@@ -299,9 +299,28 @@ func Best(accs []accounts.Account, timeout time.Duration) (accounts.Account, []P
 // accounts alternate instead of the same one soaking up every launch.
 const tieBand = 2.0
 
-// pickBest chooses among successful probes: lowest pressure, near-ties broken
-// by least-recently-used. Caller guarantees len(ok) > 0.
+// usableNow reports whether an account can serve a prompt THIS minute: no
+// window currently saturated. Pressure attenuates a saturated window whose
+// reset is minutes away (correct for ranking future capacity), but launching
+// such an account walks straight into the session-limit wall until the reset
+// — so pressure only ranks accounts that can actually answer.
+func usableNow(p Probe) bool { return p.U5 < saturated && p.U7 < saturated }
+
+// pickBest chooses among successful probes: accounts usable right now first,
+// then lowest pressure, near-ties broken by least-recently-used. Only when
+// EVERY account is limited does the ranking fall back to all of them —
+// pressure already favors the one whose reset is nearest. Caller guarantees
+// len(ok) > 0.
 func pickBest(ok []Probe) accounts.Account {
+	usable := make([]Probe, 0, len(ok))
+	for _, p := range ok {
+		if usableNow(p) {
+			usable = append(usable, p)
+		}
+	}
+	if len(usable) > 0 {
+		ok = usable
+	}
 	sort.SliceStable(ok, func(i, j int) bool { return ok[i].Pressure < ok[j].Pressure })
 	tied := make([]accounts.Account, 0, len(ok))
 	for _, p := range ok {
