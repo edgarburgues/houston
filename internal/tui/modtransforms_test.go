@@ -319,7 +319,7 @@ func TestPreviewSectionsFetchAndRearm(t *testing.T) {
 	if len(m.prevCache[key]) != 1 {
 		t.Fatal("sections must land in the cache")
 	}
-	if v := m.preview.View(); !strings.Contains(v, "prevmod: Jira") || !strings.Contains(v, "PROJ-1 In Review") {
+	if v := m.preview.View(); !strings.Contains(v, "prevmod · Jira") || !strings.Contains(v, "PROJ-1 In Review") {
 		t.Fatalf("preview must render the cached section:\n%s", v)
 	}
 

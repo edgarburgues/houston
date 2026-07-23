@@ -255,6 +255,7 @@ var (
 	headerStyle, footerStyle, paneFocused, paneBlurred    lipgloss.Style
 	selStyle, dimStyle, titleStyle, keyStyle              lipgloss.Style
 	labelStyle, valStyle, pinStyle, tagStyle              lipgloss.Style
+	secStyle, warnStyle                                   lipgloss.Style
 	helpTitleStyle, helpSectionStyle, helpModSectionStyle lipgloss.Style
 	helpBorderStyle                                       lipgloss.Style
 	tabActiveStyle, tabInactiveStyle, tabBrandStyle       lipgloss.Style
@@ -286,6 +287,9 @@ func applyTheme(t theme.Theme) {
 	valStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("231"))
 	pinStyle = lipgloss.NewStyle().Foreground(cYellow)
 	tagStyle = lipgloss.NewStyle().Foreground(cGreen)
+	// secStyle heads a preview block; warnStyle flags a broken cwd.
+	secStyle = lipgloss.NewStyle().Foreground(cBlue).Bold(true)
+	warnStyle = lipgloss.NewStyle().Foreground(cYellow).Bold(true)
 	helpTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231"))
 	helpSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
 	helpModSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(cGreen)
@@ -1081,59 +1085,115 @@ func (m *Model) updatePreview() {
 		return
 	}
 	meta := m.st.MetaOf(ms.Key())
-	var b strings.Builder
-	row := func(k, v string) {
-		b.WriteString(labelStyle.Render(fmt.Sprintf("%-9s", k)) + " " + valStyle.Render(v) + "\n")
+	w := m.preview.Width
+	if w < 8 {
+		w = 8
 	}
-	b.WriteString(titleStyle.Bold(true).Render(ms.Title) + "\n\n")
-	row("ID", ms.ID)
-	row("Project", ms.Project)
-	row("cwd", ms.Cwd)
+	var b strings.Builder
+	rule := dimStyle.Render(strings.Repeat("─", w))
+	// head opens a titled block; a leading blank line separates it from the
+	// previous block (the first head passes lead=false so the title hugs the rule).
+	head := func(title string, lead bool) {
+		if lead {
+			b.WriteString("\n")
+		}
+		b.WriteString(secStyle.Render("▍ "+clip(title, w-2)) + "\n")
+	}
+	// kv is an aligned label→value row inside a block (2-space indent, padded label).
+	kv := func(k, v string) {
+		if v == "" {
+			return // never emit a dangling label for a missing value
+		}
+		b.WriteString("  " + labelStyle.Render(fmt.Sprintf("%-9s", k)) + valStyle.Render(clip(v, w-12)) + "\n")
+	}
+
+	// Title + rule.
+	b.WriteString(titleStyle.Bold(true).Render(clip(ms.Title, w)) + "\n")
+	b.WriteString(rule + "\n")
+
+	// --- Session: only the fields that exist, stats folded into two lines ---
+	head("Session", false)
+	kv("branch", ms.GitBranch)
+	kv("version", ms.Version)
+	if ms.MessageCount() > 0 {
+		act := fmt.Sprintf("%d msgs · 👤%d 🤖%d · 🔧%d", ms.MessageCount(), ms.UserMsgs, ms.AssistantMsgs, ms.ToolCalls())
+		if ms.HasSubagents {
+			act += " · subagents"
+		}
+		kv("activity", act)
+	}
+	size := fmt.Sprintf("%.1f MB", float64(ms.SizeBytes)/(1024*1024))
+	if !ms.FirstTime.IsZero() {
+		size += " · " + ms.FirstTime.Local().Format("06-01-02") + "→" + ms.LastTime.Local().Format("06-01-02")
+	}
+	kv("size", size)
+	kv("tools", topTools(ms.Tools, 5))
+
+	// --- Location: humanized cwd, missing flag, worked-in, tags, note ---
+	head("Location", true)
+	loc := humanCwd(ms.Cwd)
 	if m.cwdMissing[ms.Key()] {
-		row("", "MISSING - press m to remap")
+		b.WriteString("  " + valStyle.Render(clip(loc, w-4)) + "  " + warnStyle.Render("⚠ missing") + "\n")
+		b.WriteString("  " + dimStyle.Render("press m to remap") + "\n")
+	} else {
+		b.WriteString("  " + valStyle.Render(clip(loc, w-2)) + "\n")
 	}
 	if ms.LastCwd != "" && ms.LastCwd != ms.Cwd {
-		row("Worked in", ms.LastCwd)
-	}
-	row("Branch", ms.GitBranch)
-	row("Version", ms.Version)
-	if !ms.FirstTime.IsZero() {
-		row("Period", ms.FirstTime.Local().Format("06-01-02 15:04")+" → "+ms.LastTime.Local().Format("06-01-02 15:04"))
-	}
-	row("Messages", fmt.Sprintf("%d (👤%d 🤖%d)", ms.MessageCount(), ms.UserMsgs, ms.AssistantMsgs))
-	row("Tool calls", fmt.Sprintf("%d", ms.ToolCalls()))
-	row("Size", fmt.Sprintf("%.1f MB", float64(ms.SizeBytes)/(1024*1024)))
-	if ms.HasSubagents {
-		row("Subagents", "yes")
-	}
-	if top := topTools(ms.Tools, 6); top != "" {
-		row("Top tools", top)
+		b.WriteString("  " + dimStyle.Render(clip("worked in "+humanCwd(ms.LastCwd), w-2)) + "\n")
 	}
 	if len(meta.Tags) > 0 {
-		b.WriteString("\n" + tagStyle.Render("#"+strings.Join(meta.Tags, "  #")) + "\n")
+		b.WriteString("  " + tagStyle.Render(clip("#"+strings.Join(meta.Tags, "  #"), w-2)) + "\n")
 	}
 	if meta.Note != "" {
-		b.WriteString("\n" + labelStyle.Render("Note: ") + valStyle.Render(meta.Note) + "\n")
+		b.WriteString("  " + dimStyle.Render("“"+clipMulti(meta.Note, 240)+"”") + "\n")
 	}
+
+	// --- Conversation: the point of the panel, given room to breathe ---
 	if ms.FirstPrompt != "" {
-		b.WriteString("\n" + labelStyle.Render("▸ First message") + "\n" + dimStyle.Render(clipMulti(ms.FirstPrompt, 600)) + "\n")
+		head("First message", true)
+		b.WriteString(valStyle.Render(clipMulti(ms.FirstPrompt, 600)) + "\n")
 	}
 	if ms.LastPrompt != "" {
-		b.WriteString("\n" + labelStyle.Render("▸ Last message") + "\n" + dimStyle.Render(clipMulti(ms.LastPrompt, 600)) + "\n")
+		head("Last message", true)
+		b.WriteString(valStyle.Render(clipMulti(ms.LastPrompt, 600)) + "\n")
 	}
-	// Module preview sections come from the cache, never from an exec here:
+
+	// --- Module sections come from the cache, never from an exec here:
 	// updatePreview runs on the event loop and must stay synchronous. The
 	// fetch is armed at the end of Update (armPreview) and lands in prevCache
 	// through modPreviewMsg.
 	for _, sec := range m.prevCache[ms.Key()] {
-		head := "▸ " + sec.Module
+		title := sec.Module
 		if sec.Title != "" {
-			head += ": " + sec.Title
+			title += " · " + sec.Title
 		}
-		b.WriteString("\n" + labelStyle.Render(head) + "\n" + valStyle.Render(clipMulti(sec.Body, 1200)) + "\n")
+		head(title, true)
+		b.WriteString(valStyle.Render(clipMulti(sec.Body, 1200)) + "\n")
 	}
-	b.WriteString("\n" + dimStyle.Render(resume.Hint(ms)) + "\n")
+
+	// --- Footer: the resume command, pinned under a closing rule ---
+	b.WriteString("\n" + rule + "\n")
+	b.WriteString(dimStyle.Render("↵ "+resume.Hint(ms)) + "\n")
 	m.preview.SetContent(b.String())
+}
+
+// humanCwd shortens a path to its last two segments (…/parent/leaf) so the
+// Location block reads at a glance instead of wrapping a full absolute path.
+// Handles both separators; short paths pass through untouched.
+func humanCwd(p string) string {
+	if p == "" {
+		return "(no cwd)"
+	}
+	norm := strings.ReplaceAll(p, "\\", "/")
+	segs := strings.Split(strings.TrimRight(norm, "/"), "/")
+	// drop empty leading segment from a rooted posix path
+	if len(segs) > 0 && segs[0] == "" {
+		segs = segs[1:]
+	}
+	if len(segs) <= 2 {
+		return p
+	}
+	return "…/" + strings.Join(segs[len(segs)-2:], "/")
 }
 
 func clipMulti(s string, max int) string {
