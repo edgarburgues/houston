@@ -1,0 +1,134 @@
+name: release-v2
+
+# A v2.* tag builds the Rust binaries, generates SHA-256 checksums, SIGNS the
+# checksum file with the release key, self-checks that signature against the
+# public key compiled into the binary, and publishes everything.
+#
+# The trust chain a user's `houston update` walks is the reverse of this job:
+#   embedded public key → checksums.txt.minisig → checksums.txt → binary
+# so the signing step is not optional decoration — without it every install
+# refuses to proceed.
+on:
+  push:
+    tags:
+      - "v2.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: houston-linux-amd64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: houston-linux-arm64
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            asset: houston-darwin-arm64
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            asset: houston-darwin-amd64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: houston-windows-amd64.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rust toolchain
+        run: rustup update stable && rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # A tag that disagrees with Cargo.toml would ship a binary reporting the
+      # wrong version — and since the update check compares against its own
+      # version, it could nag forever or never. Fail here instead.
+      - name: Tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          crate=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          tag="${GITHUB_REF_NAME#v}"
+          echo "crate=$crate tag=$tag"
+          [ "$crate" = "$tag" ] || { echo "::error::Cargo.toml is $crate but the tag is $tag"; exit 1; }
+
+      - name: Test
+        run: cargo test --workspace --release --target ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release -p houston --target ${{ matrix.target }}
+
+      - name: Stage asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          src="target/${{ matrix.target }}/release/houston"
+          [ -f "$src.exe" ] && src="$src.exe"
+          cp "$src" "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staging
+          merge-multiple: true
+
+      - name: Collect and checksum
+        working-directory: staging
+        run: |
+          chmod +x houston-*
+          sha256sum houston-* > checksums.txt
+          cat checksums.txt
+
+      # Signing uses the Linux binary we just built, so the tool that signs is
+      # the same code that verifies. The key arrives through the environment and
+      # is never written to the runner's disk.
+      - name: Sign checksums
+        working-directory: staging
+        env:
+          HOUSTON_SIGNING_KEY: ${{ secrets.HOUSTON_SIGNING_KEY }}
+        run: |
+          if [ -z "$HOUSTON_SIGNING_KEY" ]; then
+            echo "::error::HOUSTON_SIGNING_KEY is not set — releases must be signed or `houston update` will refuse them"
+            exit 1
+          fi
+          # --tag binds the signature to THIS release: without it a signed
+          # checksum file could be lifted into another tag and still verify,
+          # letting an "update" install older binaries.
+          ./houston-linux-amd64 sign checksums.txt --tag "${GITHUB_REF_NAME}"
+
+      # The self-check that matters: does the signature we are about to publish
+      # validate against the public key COMPILED INTO the binary users will run,
+      # and does it name this release? A rotated secret or a missing tag is
+      # caught here, not by users.
+      - name: Verify against the embedded key
+        working-directory: staging
+        run: ./houston-linux-amd64 verify checksums.txt --tag "${GITHUB_REF_NAME}"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: staging
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            houston-* checksums.txt checksums.txt.minisig \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

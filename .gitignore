@@ -3,3 +3,10 @@
 /dist/
 /packaging/bin/
 *.log
+target/
+
+# Release-signing secrets. They live in ~/.houston-keys, outside the tree; this
+# is the second line of defence in case one is ever copied in here.
+*.key
+houston-keys/
+.houston-keys/

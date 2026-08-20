@@ -1,0 +1,23 @@
+[package]
+name = "houston"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "houston"
+path = "src/main.rs"
+
+[dependencies]
+houston-tui = { path = "../houston-tui" }
+houston-core = { path = "../houston-core" }
+# The binary re-invokes itself as `houston wasm-host <module>` to run a plugin
+# in a killable child process (see houston-plugins::serve_stdio).
+houston-plugins = { path = "../houston-plugins" }
+# `doctor` reports which plugins target an api this build cannot serve.
+houston-api = { path = "../houston-api" }
+anyhow.workspace = true
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

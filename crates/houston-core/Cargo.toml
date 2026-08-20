@@ -1,0 +1,24 @@
+[package]
+name = "houston-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+ureq = "2"
+# Self-update verifies the downloaded binary against the release checksums, and
+# the checksums against a minisign Ed25519 signature. Hand-rolling crypto for a
+# security check is not an option.
+sha2 = "0.10"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+blake2 = "0.10"
+base64 = "0.22"
+# OS CSPRNG for generating the release-signing key.
+getrandom = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

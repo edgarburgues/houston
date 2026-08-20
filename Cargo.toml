@@ -1,0 +1,21 @@
+# Houston 2.0 — Rust rewrite (branch v2). The Go v1 tree still lives on `main`
+# and stays installed; cargo only sees this Cargo.toml, `go` only sees go.mod.
+[workspace]
+members = ["crates/houston", "crates/houston-tui", "crates/houston-core", "crates/houston-api", "crates/houston-plugins"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "2.0.0-alpha.0"
+license = "MIT"
+repository = "https://github.com/edgarburgues/houston"
+
+[workspace.dependencies]
+ratatui = "0.29"
+anyhow = "1"
+
+# Thin release profile: this is a daily-driver TUI, size and startup matter.
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
