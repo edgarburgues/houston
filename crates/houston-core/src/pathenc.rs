@@ -140,8 +140,21 @@ mod tests {
     fn decode_walks_real_directories_resolving_hyphens() {
         // Build <tmp>/a-b/c.d and encode its path; decode must reconstruct it
         // even though '-' and '.' both encode to '-'.
+        //
+        // The temp path is canonicalized FIRST, because the walk matches each
+        // token against directory names as listed on disk. On GitHub's runners
+        // %TEMP% goes through an 8.3 short name (`RUNNER~1`): its `~` encodes to
+        // `-`, the listing shows the long name, nothing matches, and decode
+        // fabricates a path that cannot canonicalize. That is a genuine limit of
+        // the lossy encoding (mitigated in production by `resolve_resume_dir`
+        // falling back to the stored cwd), not what this test pins — this test
+        // pins hyphen/dot resolution against real directories.
         let tmp = tempfile::tempdir().unwrap();
-        let deep = tmp.path().join("a-b").join("c.d");
+        let canon = fs::canonicalize(tmp.path()).unwrap();
+        // canonicalize returns the `\\?\` extended form, which encodes with a
+        // leading "--" that decode rightly refuses; strip it for the test.
+        let base = canon.to_str().unwrap().trim_start_matches(r"\\?\").to_string();
+        let deep = Path::new(&base).join("a-b").join("c.d");
         fs::create_dir_all(&deep).unwrap();
         let enc = encode(deep.to_str().unwrap());
         let got = decode_project_dir(&enc).unwrap();
