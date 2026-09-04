@@ -178,8 +178,28 @@ impl Store {
 
     // --- program mutations ---
 
+    /// By the name shown, or failing that by the file it maps to — see
+    /// `prog_key`. Exact first so an unambiguous name never loses to a
+    /// case-folded neighbour.
     pub fn program_by_name(&self, name: &str) -> Option<&Program> {
-        self.programs.iter().find(|p| p.name == name)
+        if let Some(p) = self.programs.iter().find(|p| p.name == name) {
+            return Some(p);
+        }
+        let key = prog_key(name);
+        self.programs.iter().find(|p| prog_key(&p.name) == key)
+    }
+
+    /// `program_by_name`'s identity rule, for the mutating paths.
+    fn program_mut(&mut self, name: &str) -> Option<&mut Program> {
+        let i = self
+            .programs
+            .iter()
+            .position(|p| p.name == name)
+            .or_else(|| {
+                let key = prog_key(name);
+                self.programs.iter().position(|p| prog_key(&p.name) == key)
+            })?;
+        self.programs.get_mut(i)
     }
 
     pub fn create_program(&mut self, name: &str, desc: &str) -> io::Result<()> {
@@ -199,7 +219,7 @@ impl Store {
     }
 
     pub fn add_to_program(&mut self, name: &str, mission_key: &str) -> io::Result<()> {
-        let Some(p) = self.programs.iter_mut().find(|p| p.name == name) else {
+        let Some(p) = self.program_mut(name) else {
             return Ok(());
         };
         if p.missions.iter().any(|k| k == mission_key) {
@@ -211,7 +231,7 @@ impl Store {
     }
 
     pub fn remove_from_program(&mut self, name: &str, mission_key: &str) -> io::Result<()> {
-        let Some(p) = self.programs.iter_mut().find(|p| p.name == name) else {
+        let Some(p) = self.program_mut(name) else {
             return Ok(());
         };
         p.missions.retain(|k| k != mission_key);
@@ -234,7 +254,8 @@ const WINDOWS_RESERVED: [&str; 22] = [
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
-fn prog_file(dir: &Path, name: &str) -> PathBuf {
+/// The file stem a program's `.prog` gets, sanitized for Windows.
+fn prog_stem(name: &str) -> String {
     let mut safe: String = name
         .chars()
         .map(|r| {
@@ -252,7 +273,23 @@ fn prog_file(dir: &Path, name: &str) -> PathBuf {
     if safe.is_empty() || WINDOWS_RESERVED.contains(&stem.as_str()) {
         safe = format!("_{safe}");
     }
-    dir.join("programs").join(format!("{safe}.prog"))
+    safe
+}
+
+/// A program's IDENTITY: the file it would land on, case-folded.
+///
+/// Not the displayed name. `prog_stem` maps many names onto one file — every
+/// character Windows forbids collapses to `_`, trailing dots and spaces are
+/// dropped — and NTFS is case-insensitive on top of that. So `Work` and `work`,
+/// or `a/b` and `a:b`, are one `.prog`, and comparing display names let the
+/// second program silently overwrite the first's file while both sat in the
+/// list. Whatever decides "same program" has to be what decides "same file".
+fn prog_key(name: &str) -> String {
+    prog_stem(name).to_lowercase()
+}
+
+fn prog_file(dir: &Path, name: &str) -> PathBuf {
+    dir.join("programs").join(format!("{}.prog", prog_stem(name)))
 }
 
 #[cfg(test)]
@@ -375,6 +412,42 @@ mod tests {
 
         let fresh = Store::load_from(tmp.path().to_path_buf()).unwrap();
         assert!(!fresh.meta_of("p/x").pinned, "the toggle flipped the on-disk value");
+    }
+
+    /// Two programs whose names differ only in ways `prog_file` erases are ONE
+    /// program, because they are one file. Comparing display names let the
+    /// second overwrite the first's `.prog` while both sat in the list.
+    #[test]
+    fn programs_that_map_to_one_file_are_one_program() {
+        let (tmp, mut s) = temp_store();
+        s.create_program("Work", "the real one").unwrap();
+        // Case only: NTFS gives these the same file.
+        s.create_program("work", "would clobber it").unwrap();
+        // And every forbidden character collapses to `_`, so do these.
+        s.create_program("a/b", "first").unwrap();
+        s.create_program("a:b", "same file as a/b").unwrap();
+
+        assert_eq!(s.programs.len(), 2, "one program per file: {:?}", s.programs.iter().map(|p| &p.name).collect::<Vec<_>>());
+        assert_eq!(s.program_by_name("Work").unwrap().description, "the real one");
+        // The lookup follows the same identity rule, so the second spelling
+        // reaches the program that owns the file rather than nothing.
+        assert_eq!(s.program_by_name("work").unwrap().description, "the real one");
+
+        // One file on disk per program. `.lock` files live here too (see
+        // `lock_for`), so count only the documents.
+        let mut files: Vec<String> = std::fs::read_dir(tmp.path().join("programs"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".prog"))
+            .collect();
+        files.sort();
+        assert_eq!(files, vec!["Work.prog".to_string(), "a_b.prog".to_string()], "one .prog per program");
+
+        // A mission added under the second spelling lands on the one program.
+        s.add_to_program("work", "p/1").unwrap();
+        let reloaded = Store::load_from(tmp.path().to_path_buf()).unwrap();
+        assert_eq!(reloaded.program_by_name("Work").unwrap().missions, vec!["p/1".to_string()]);
     }
 
     #[test]

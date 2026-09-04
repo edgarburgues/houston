@@ -47,6 +47,7 @@ pub mod scan;
 pub mod segments;
 pub mod settings_schema;
 pub mod store;
+pub mod text;
 pub mod update;
 
 /// One process-wide lock for tests that set environment variables. It must be

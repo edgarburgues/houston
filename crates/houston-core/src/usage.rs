@@ -184,6 +184,18 @@ fn refresh_and_save(a: &Account, stale: &str, timeout: Duration, now: DateTime<U
     }
 }
 
+/// The phrases that mean "a login fixes this", and the only things
+/// `Usage::needs_login` matches on.
+///
+/// A named constant because the classification is by prose and the spellings
+/// drifted. `persist_tokens` wrote "needs a fresh login" — the gravest failure
+/// in this module, since the refresh token is already spent server-side — and
+/// that was the one message `needs_login` did not recognise, so the status line
+/// never offered the login its own error text was asking for.
+///
+/// Any new message here that a login would fix has to carry one of these.
+const NEEDS_LOGIN_MARKERS: [&str; 2] = ["re-login", "not logged in"];
+
 /// How many times to try writing a freshly refreshed credential.
 const PERSIST_TRIES: u32 = 3;
 
@@ -214,7 +226,7 @@ fn persist_tokens(a: &Account, t: &oauth::Tokens) -> Result<(), String> {
     }
     Err(format!(
         "the token was refreshed but could NOT be saved after {PERSIST_TRIES} tries ({last}). \
-         The old token is already spent, so account {} needs a fresh login: houston run -a {}",
+         The old token is already spent, so account {} needs a re-login: houston run -a {}",
         a.id, a.id
     ))
 }
@@ -502,7 +514,7 @@ impl Usage {
     /// strings this crate itself writes (`re-login`, `not logged in`), which is
     /// the one vocabulary that is ours rather than the endpoint's.
     pub fn needs_login(&self) -> bool {
-        self.err.contains("re-login") || self.err.contains("not logged in")
+        NEEDS_LOGIN_MARKERS.iter().any(|m| self.err.contains(m))
     }
 }
 
@@ -729,10 +741,30 @@ pub fn is_stale(accs: &[Account], ttl: Duration) -> bool {
 /// wait (the background refresher, the TUI's off-thread refresh, `usage
 /// --refresh`) may call it.
 pub fn refresh(accs: &[Account], ttl: Duration, timeout: Duration) {
-    let now = Utc::now().timestamp();
-    let mut cache = read_cache();
-    let stale = stale_ids(accs, &cache, ttl, now);
-    if stale.is_empty() {
+    refresh_with(accs, ttl, |stale| probe_all(stale, timeout))
+}
+
+/// `refresh` with the network step injected, so the read/probe/write ordering
+/// can be tested without a network.
+///
+/// The ordering is the entire content of this function, and it is not
+/// incidental. `write_cache` replaces the WHOLE map, so every decision and
+/// every merge has to be made against the cache as it is at that moment:
+///
+/// - **Staleness is decided under the lock**, not before it. The pre-check
+///   below runs unlocked and is only an optimisation; by the time the lock is
+///   ours, a refresher that held it may have already probed exactly what we
+///   were about to.
+/// - **The probes are folded into a cache re-read AFTER probing.** This is the
+///   one that lost data. The old code merged into the snapshot it had taken
+///   before the lock, so any entry written in between was dropped on the
+///   floor — a `usage --refresh --force` from the rate-limit hook could be
+///   erased by a routine refresh landing behind it, which is precisely the
+///   case the forcing exists for.
+fn refresh_with(accs: &[Account], ttl: Duration, probe: impl FnOnce(&[Account]) -> Vec<Probe>) {
+    // Unlocked pre-check: nothing stale means nothing to do, and this is the
+    // common case on a machine that renders a statusline every few hundred ms.
+    if stale_ids(accs, &read_cache(), ttl, Utc::now().timestamp()).is_empty() {
         return;
     }
     // Single-flight across PROCESSES: with several Claude sessions open every
@@ -743,22 +775,30 @@ pub fn refresh(accs: &[Account], ttl: Duration, timeout: Duration) {
     let path = cache_path();
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
     let lock_path = path.with_extension("json.lock");
-    if let Some(_lk) = flock::try_acquire(&lock_path) {
-        for p in probe_all(&stale, timeout) {
-            let merged = merge_probe(cache.get(&p.account.id), &p, now);
-            cache.insert(p.account.id.clone(), merged);
-        }
-        write_cache(&cache);
+    let Some(_lk) = flock::try_acquire(&lock_path) else { return };
+
+    let now = Utc::now().timestamp();
+    let stale = stale_ids(accs, &read_cache(), ttl, now);
+    if stale.is_empty() {
+        return;
     }
+    let probes = probe(&stale);
+
+    let mut cache = read_cache();
+    for p in probes {
+        let merged = merge_probe(cache.get(&p.account.id), &p, now);
+        cache.insert(p.account.id.clone(), merged);
+    }
+    write_cache(&cache);
 }
 
-/// Cached quota for every account, refreshing inline what has gone stale. The
-/// TUI and the launcher use this — they run off the render path and may wait.
-/// **Not** for the statusline: use `read_utilization` there.
-pub fn cached_utilization(accs: &[Account], ttl: Duration, timeout: Duration) -> Vec<Usage> {
-    refresh(accs, ttl, timeout);
-    read_utilization(accs)
-}
+// There is deliberately no `cached_utilization(accs, ttl, timeout)` here any
+// more. It read the cache AND probed the network in one blocking call, which
+// made "just show me the quota" indistinguishable at the call site from "block
+// this thread for up to 4 seconds per account" — and both TUI panes duly called
+// it from `post_render`, freezing the render loop. Splitting it leaves the two
+// halves impossible to confuse: `read_utilization` is a pure cache read, and
+// `refresh` is the blocking one, named for what it costs.
 
 // --- background refresh (what keeps a pure-read statusline from freezing) -----
 
@@ -791,10 +831,8 @@ pub fn claim_background_refresh(accs: &[Account], ttl: Duration) -> bool {
         return false;
     }
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
-    let tmp = path.with_extension(format!("stamp.{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, now.to_string()).is_ok() && std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
+    // Through the shared writer, not a third hand-rolled temp+rename.
+    let _ = crate::atomic::write(&path, now.to_string().as_bytes());
     true
 }
 
@@ -1037,6 +1075,11 @@ mod tests {
         assert!(!mk("usage request failed: timeout").needs_login());
         assert!(!mk("usage HTTP 500").needs_login());
         assert!(!mk("").needs_login());
+        // Every marker is one this module actually writes: a marker nothing
+        // emits is a classification that never fires.
+        for m in NEEDS_LOGIN_MARKERS {
+            assert!(mk(&format!("something {m} something")).needs_login(), "{m}");
+        }
     }
 
     #[test]
@@ -1166,6 +1209,15 @@ mod tests {
         assert!(err.contains("could NOT be saved"), "{err}");
         assert!(err.contains("already spent"), "the consequence is stated: {err}");
         assert!(err.contains("houston run -a stranded"), "and the fix is a command: {err}");
+        // And it must CLASSIFY as needing a login, not just read like it.
+        // This is the gravest failure here — the refresh token is spent
+        // server-side — and it said "needs a fresh login", which
+        // `needs_login` did not match, so the status line never offered the
+        // login the message was asking for.
+        assert!(
+            Usage { err: err.clone(), ..Default::default() }.needs_login(),
+            "an unpersistable refresh is exactly when the login prompt must fire: {err}"
+        );
     }
 
     #[test]
@@ -1183,6 +1235,71 @@ mod tests {
         // Exactly at the TTL counts as stale (>=), so a 60s TTL refreshes at 60s.
         let at_ttl = stale_ids(&accs[..1], &cache, Duration::from_secs(10), now);
         assert_eq!(at_ttl.len(), 1);
+    }
+
+    /// The lost update this fix exists for. `write_cache` replaces the whole
+    /// map, so a refresh that folds its probes into a snapshot taken earlier
+    /// erases every entry written in the meantime. The real victim was a
+    /// `usage --refresh --force` from the rate-limit hook being wiped by a
+    /// routine refresh landing behind it.
+    #[test]
+    fn a_refresh_folds_into_the_cache_as_it_is_after_probing() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("HOUSTON_HOME", tmp.path()) };
+
+        let accs = vec![Account { id: "mine".into(), ..Default::default() }];
+        let mut seed = Cache::new();
+        seed.insert("mine".into(), CacheEntry { ts: 0, ..Default::default() });
+        write_cache(&seed);
+
+        // Someone else's forced probe finishes while ours is in flight: it holds
+        // no lock by then, having already written and gone. Its entry has to
+        // survive our write.
+        let probe = |stale: &[Account]| {
+            assert_eq!(stale.len(), 1, "only the account with the old ts is stale");
+            let mut theirs = read_cache();
+            let fresh = CacheEntry { u5: 42.0, ok: true, ts: Utc::now().timestamp(), ..Default::default() };
+            theirs.insert("theirs".into(), fresh);
+            write_cache(&theirs);
+            vec![Probe { account: stale[0].clone(), u5: 7.0, ok: true, ..Default::default() }]
+        };
+        refresh_with(&accs, Duration::from_secs(60), probe);
+
+        let after = read_cache();
+        assert_eq!(after.get("theirs").map(|e| e.u5), Some(42.0), "a concurrent entry was erased");
+        assert_eq!(after.get("mine").map(|e| e.u5), Some(7.0), "our own probe did not land");
+
+        unsafe { std::env::remove_var("HOUSTON_HOME") };
+    }
+
+    /// Deciding staleness under the lock must not turn `--force` (TTL zero) into
+    /// a no-op: a cache written one second ago is still worth re-probing when the
+    /// caller says so, because "logged in" and "the token still works" are
+    /// different questions.
+    #[test]
+    fn a_forced_refresh_probes_a_cache_that_is_brand_new() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("HOUSTON_HOME", tmp.path()) };
+
+        let accs = vec![Account { id: "mine".into(), ..Default::default() }];
+        let mut seed = Cache::new();
+        seed.insert("mine".into(), CacheEntry { u5: 1.0, ok: true, ts: Utc::now().timestamp(), ..Default::default() });
+        write_cache(&seed);
+
+        let mut probed = false;
+        refresh_with(&accs, Duration::ZERO, |stale| {
+            probed = true;
+            vec![Probe { account: stale[0].clone(), u5: 9.0, ok: true, ..Default::default() }]
+        });
+        assert!(probed, "--force must probe regardless of how fresh the cache is");
+        assert_eq!(read_cache().get("mine").map(|e| e.u5), Some(9.0));
+
+        // And the same call without forcing leaves that fresh value alone.
+        refresh_with(&accs, Duration::from_secs(60), |_| panic!("nothing was stale"));
+
+        unsafe { std::env::remove_var("HOUSTON_HOME") };
     }
 
     /// The statusline renders every few hundred ms in every open session; a

@@ -167,8 +167,8 @@ fn trim_locked(path: &std::path::Path) {
     if !too_big {
         return;
     }
-    let Ok(body) = std::fs::read_to_string(path) else { return };
-    let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+    let Ok(bytes) = std::fs::read(path) else { return };
+    let lines: Vec<&str> = utf8_lines(&bytes).filter(|l| !l.trim().is_empty()).collect();
     let keep = lines.len().saturating_sub(KEEP_LINES);
     let mut out = lines[keep..].join("\n");
     out.push('\n');
@@ -182,8 +182,24 @@ fn trim_locked(path: &std::path::Path) {
 /// newer Houston may write fields this build does not model. A journal that
 /// could break a view by being slightly wrong would be worse than no journal.
 pub fn read_all() -> Vec<Entry> {
-    let Ok(body) = std::fs::read_to_string(path()) else { return Vec::new() };
-    body.lines().filter_map(|l| serde_json::from_str::<Entry>(l).ok()).filter(|e| !e.event.is_empty()).collect()
+    let Ok(bytes) = std::fs::read(path()) else { return Vec::new() };
+    utf8_lines(&bytes).filter_map(|l| serde_json::from_str::<Entry>(l).ok()).filter(|e| !e.event.is_empty()).collect()
+}
+
+/// Every line of a journal that is valid UTF-8, in order, `\r\n` tolerated.
+///
+/// Bytes and a per-LINE decode, never `read_to_string`. A killed writer can
+/// leave a partial line, and when the cut falls inside a multibyte character
+/// `read_to_string` fails for the WHOLE file: `read_all` then returned an empty
+/// journal and `trim_locked` gave up, so the file grew past `MAX_BYTES`
+/// forever. `read_all`'s own doc promised broken lines were skipped in
+/// silence — only the JSON half of that was true, and the byte half is the one
+/// a crash produces.
+fn utf8_lines(bytes: &[u8]) -> impl Iterator<Item = &str> {
+    bytes
+        .split(|b| *b == b'\n')
+        .filter_map(|l| std::str::from_utf8(l).ok())
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
 }
 
 /// The newest `n` entries, oldest first (so it reads like `tail`).
@@ -233,6 +249,33 @@ mod tests {
         // Empty fields are omitted, so a line stays legible.
         let raw = std::fs::read_to_string(path()).unwrap();
         assert!(!raw.lines().next().unwrap().contains("session"), "empty fields are not written: {raw}");
+
+        unsafe { std::env::remove_var("HOUSTON_HOME") };
+    }
+
+    /// A killed writer can cut a line inside a multibyte character. That used
+    /// to lose the ENTIRE journal, because `read_to_string` fails for the whole
+    /// file: `read_all` returned nothing and `trim_locked` never trimmed, so
+    /// the file grew without bound. Only the surrounding lines may be lost —
+    /// and in fact none of them are.
+    #[test]
+    fn a_line_cut_inside_a_character_costs_only_that_line() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _tmp = temp_home();
+
+        append(&Entry { account: "before".into(), ..Entry::now(EVENT_LAUNCH) });
+        // A partial UTF-8 sequence: the first byte of 'é' with its second cut
+        // off by the kill, then a newline.
+        let mut raw = std::fs::read(path()).unwrap();
+        raw.extend_from_slice(br#"{"event":"resume","ts":1,"account":"cut-"#);
+        raw.push(0xC3);
+        raw.push(b'\n');
+        std::fs::write(path(), &raw).unwrap();
+        append(&Entry { account: "after".into(), ..Entry::now(EVENT_RESUME) });
+
+        let all = read_all();
+        let accounts: Vec<&str> = all.iter().map(|e| e.account.as_str()).collect();
+        assert_eq!(accounts, vec!["before", "after"], "a torn line must not take the file with it");
 
         unsafe { std::env::remove_var("HOUSTON_HOME") };
     }

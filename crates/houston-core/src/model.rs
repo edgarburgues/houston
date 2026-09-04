@@ -39,8 +39,15 @@ pub struct Mission {
     pub has_subagents: bool,
     /// File mtime in nanos, for incremental rescans.
     pub mtime_ns: i64,
-    /// Lowercased prose for in-memory search.
-    pub search: String,
+    // No `search` field. It held the whole lowercased transcript prose, nothing
+    // ever read it, and because `Mission` is what the scan cache stores it was
+    // ~92% of that cache. A search feature, if one is ever added, either
+    // matches the fields already here (title, slug, prompts, branch) or
+    // re-reads the transcripts — which is a cost paid when searching rather
+    // than on every scan of every session.
+    //
+    // Removing it does not break an existing cache: serde ignores fields it
+    // does not know, so an old file still loads, one field lighter.
 }
 
 impl Mission {
@@ -146,6 +153,26 @@ pub struct Program {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `search` held the whole lowercased transcript prose and nothing ever
+    /// read it. Because `Mission` is what the scan cache stores, it was 95.4%
+    /// of the real cache on this machine — 8.79 MB down to 401 KB, measured on
+    /// the file the previous build had written.
+    ///
+    /// Both halves matter: it must stay out of what we write, and a cache that
+    /// still carries it has to keep loading, or the first scan after an upgrade
+    /// silently re-parses every transcript.
+    #[test]
+    fn a_mission_writes_no_search_field_and_still_reads_an_old_one() {
+        let m = Mission { id: "s".into(), title: "hi".into(), ..Default::default() };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("search"), "the dead field came back: {json}");
+
+        let old = r#"{"id":"s","title":"hi","search":"a whole transcript, lowercased"}"#;
+        let back: Mission = serde_json::from_str(old).expect("an existing cache entry must still load");
+        assert_eq!(back.id, "s");
+        assert_eq!(back.title, "hi");
+    }
 
     #[test]
     fn key_is_project_plus_id() {

@@ -257,6 +257,9 @@ pub(crate) mod tests {
     /// An empty World on a throwaway store, for widget tests elsewhere in the
     /// crate that only need *a* world to render or tick against.
     pub fn test_world() -> World {
+        // Every test that starts from a World gets the isolation, including the
+        // env guard that keeps `claude_settings` off the real `~/.claude`.
+        crate::tests::isolate_store();
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::load_from(tmp.path().to_path_buf()).unwrap();
         std::mem::forget(tmp); // outlive the borrow; it is a temp dir

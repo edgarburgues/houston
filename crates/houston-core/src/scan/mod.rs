@@ -17,10 +17,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-/// Cap on the prose kept per mission for in-memory search, so a huge
-/// transcript can't bloat the index.
-const MAX_SEARCH_BYTES: usize = 256 * 1024;
-
 /// The subset of a transcript line Houston cares about.
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -93,7 +89,6 @@ pub fn parse_file(path: &Path) -> Option<Mission> {
         }
     }
 
-    let mut search = String::new();
     let mut reader = BufReader::with_capacity(1 << 20, f);
     let mut line = String::new();
     loop {
@@ -103,13 +98,12 @@ pub fn parse_file(path: &Path) -> Option<Mission> {
             Ok(_) => {
                 let s = line.trim();
                 if !s.is_empty() {
-                    ingest(&mut m, &mut search, s);
+                    ingest(&mut m, s);
                 }
             }
             Err(_) => break,
         }
     }
-    m.search = search.to_lowercase();
     if m.title.is_empty() {
         m.title = first_line(&m.first_prompt).to_string();
     }
@@ -131,7 +125,7 @@ pub(crate) fn mtime_ns(fi: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-fn ingest(m: &mut Mission, search: &mut String, line: &str) {
+fn ingest(m: &mut Mission, line: &str) {
     let Ok(e) = serde_json::from_str::<RawEntry>(line) else {
         return;
     };
@@ -173,18 +167,13 @@ fn ingest(m: &mut Mission, search: &mut String, line: &str) {
             if !txt.is_empty() && !e.is_meta {
                 m.user_msgs += 1;
                 if m.first_prompt.is_empty() {
-                    m.first_prompt = txt.clone();
+                    m.first_prompt = txt;
                 }
-                append_search(search, &txt);
             }
             stamp_time(m, &e.timestamp);
         }
         "assistant" => {
             m.assistant_msgs += 1;
-            let txt = message_text(e.message.as_ref());
-            if !txt.is_empty() {
-                append_search(search, &txt);
-            }
             for name in tool_names(e.message.as_ref()) {
                 *m.tools.entry(name).or_insert(0) += 1;
             }
@@ -192,14 +181,6 @@ fn ingest(m: &mut Mission, search: &mut String, line: &str) {
         }
         _ => {}
     }
-}
-
-fn append_search(search: &mut String, txt: &str) {
-    if search.len() >= MAX_SEARCH_BYTES {
-        return;
-    }
-    search.push_str(txt);
-    search.push('\n');
 }
 
 /// Pull human/assistant prose out of a message, ignoring tool_result /
@@ -299,7 +280,6 @@ mod tests {
         assert_eq!(m.assistant_msgs, 1);
         assert_eq!(m.tools.get("Bash"), Some(&1));
         assert_eq!(m.git_branch, "main");
-        assert!(m.search.contains("hola houston"));
         assert!(m.first_time.is_some());
     }
 

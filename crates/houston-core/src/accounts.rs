@@ -190,7 +190,12 @@ pub fn active_id() -> Option<String> {
 
 /// Path equality that tolerates the two spellings of the same directory: exact
 /// first, then canonicalized (which resolves the junctions Houston creates).
-fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+///
+/// The `zip` is what makes it correct and is easy to lose: comparing
+/// `canonicalize(a).ok() == canonicalize(b).ok()` reports EQUAL when both
+/// fail, because `None == None`. Two paths that do not exist are not the same
+/// directory. A copy in the statusline had exactly that bug.
+pub fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
     a == b
         || fs::canonicalize(a).ok().zip(fs::canonicalize(b).ok()).map(|(x, y)| x == y).unwrap_or(false)
 }
@@ -269,37 +274,15 @@ pub fn touch_last_use(id: &str, now: &str) -> io::Result<()> {
 /// matters as much as the rename: two processes writing the same fixed .tmp
 /// path can interleave and rename corrupted bytes into place.
 /// Atomic write for the files in this module — the account registry and
-/// `.credentials.json`. OWNER-ONLY by construction: these hold OAuth access and
-/// refresh tokens, and a rename installs the TEMP file's permissions, so
-/// writing the temp with the default umask would silently widen a 0600
-/// credential file to world-readable on every refresh.
+/// `.credentials.json`.
+///
+/// This used to be its own implementation, and it was the one that got the
+/// permissions right: it created the temp WITH the destination's mode instead
+/// of chmod'ing it afterwards. That is now what `atomic::write` does for
+/// everybody, so this is a call rather than a copy — the point of folding them
+/// together being that the lesson was learned here and nowhere else.
 fn write_atomic(path: &std::path::Path, b: &[u8]) -> io::Result<()> {
-    let dir = path.parent().unwrap_or(std::path::Path::new("."));
-    let base = path.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = dir.join(format!(".{base}.{}.tmp", std::process::id()));
-
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        // Keep the file's own mode when it already exists; 0600 otherwise.
-        let mode = fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
-        opts.mode(mode);
-    }
-    {
-        use io::Write;
-        let mut f = opts.open(&tmp)?;
-        f.write_all(b)?;
-        f.flush()?;
-    }
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
+    crate::atomic::write(path, b)
 }
 
 #[cfg(test)]

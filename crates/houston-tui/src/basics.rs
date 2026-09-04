@@ -25,20 +25,58 @@ fn usage_bar(pct: f64, cells: usize) -> String {
 
 // ------------------------------------------------------------------ quota --
 
-/// Per-account quota bars, from the shared usage cache (60s TTL, so it never
-/// probes per frame — the statusline keeps it warm). Refreshed on mount and on
-/// `r`, off the render path.
+/// How stale a cached quota may be before a pane asks for a new one.
+const QUOTA_TTL: Duration = Duration::from_secs(60);
+
+/// A flag a background probe raises when it has written new numbers.
+type Fresh = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
+/// Probe `accs` on a background thread and raise `fresh` when the cache has the
+/// answer.
+///
+/// The panes used to call `usage::cached_utilization`, which reads the cache
+/// AND probes the network in one blocking call — up to 4 s per account — from
+/// `post_render`, i.e. from inside the render loop. So mounting the pane, or
+/// pressing `r`, froze the whole TUI. (The quota pane's own doc claimed it
+/// refreshed "off the render path"; `post_render` is the render path.)
+///
+/// Nothing needs to be notified when this lands: the event loop wakes every
+/// 100 ms and re-renders, so the pane sees the flag and re-reads the cache on
+/// the next frame. `usage::refresh` is single-flighted across processes by its
+/// own lock, so two panes mounting at once cost one probe.
+fn spawn_probe(accs: Vec<accounts::Account>, ttl: Duration, timeout: Duration, fresh: Fresh) {
+    std::thread::spawn(move || {
+        houston_core::usage::refresh(&accs, ttl, timeout);
+        fresh.store(true, std::sync::atomic::Ordering::Release);
+    });
+}
+
+/// Per-account quota bars, from the shared usage cache (the statusline keeps it
+/// warm). Reading is a pure cache read on the UI thread; the probe that fills
+/// the cache runs on a background thread — see `spawn_probe`.
 #[derive(Default)]
 pub struct QuotaWidget {
     rows: Vec<houston_core::usage::Usage>,
     loaded: bool,
+    fresh: Fresh,
 }
 
 impl QuotaWidget {
-    fn refresh(&mut self) {
-        let accs = accounts::load().unwrap_or_default();
-        self.rows = houston_core::usage::cached_utilization(&accs, Duration::from_secs(60), Duration::from_secs(4));
+    /// Read the cache. Never blocks, never probes.
+    fn reload(&mut self) {
+        self.rows = houston_core::usage::read_utilization(&accounts::load().unwrap_or_default());
         self.loaded = true;
+    }
+
+    /// Show what the cache has now and ask for newer numbers in the background.
+    /// `force` is the `r` key: an explicit ask re-probes however fresh the
+    /// cache is, which is the whole point of asking.
+    fn refresh(&mut self, force: bool) {
+        let accs = accounts::load().unwrap_or_default();
+        self.rows = houston_core::usage::read_utilization(&accs);
+        self.loaded = true;
+        let ttl = if force { Duration::ZERO } else { QUOTA_TTL };
+        spawn_probe(accs, ttl, Duration::from_secs(4), std::sync::Arc::clone(&self.fresh));
     }
 }
 
@@ -139,7 +177,7 @@ impl Widget for QuotaWidget {
     }
     fn on_key(&mut self, key: char, _w: &mut World) -> bool {
         if key == 'r' {
-            self.refresh();
+            self.refresh(true);
             true
         } else {
             false
@@ -149,7 +187,10 @@ impl Widget for QuotaWidget {
     fn on_scroll(&mut self, _up: bool, _w: &mut World) {}
     fn post_render(&mut self, _area: Rect, _w: &World, _focused: bool) {
         if !self.loaded {
-            self.refresh();
+            self.refresh(false);
+        } else if self.fresh.swap(false, std::sync::atomic::Ordering::Acquire) {
+            // A background probe landed: pick it up without probing again.
+            self.reload();
         }
     }
     fn commands(&self) -> Vec<Command> {
@@ -169,15 +210,26 @@ impl Widget for QuotaWidget {
 pub struct AccountsWidget {
     util: std::collections::HashMap<String, houston_core::usage::Usage>,
     loaded: bool,
+    fresh: Fresh,
 }
 
 impl AccountsWidget {
-    /// Probe each account's quota (cached) for display. Reads the account list
-    /// from the World (loaded at startup); only mutates our own view state.
-    fn probe(&mut self, accs: &[accounts::Account]) {
-        let util = houston_core::usage::cached_utilization(accs, Duration::from_secs(60), Duration::from_secs(3));
+    /// Read each account's cached quota. Never blocks; the probe that fills the
+    /// cache is `spawn_probe`'s job. Reads the account list from the World
+    /// (loaded at startup); only mutates our own view state.
+    fn reload(&mut self, accs: &[accounts::Account]) {
+        let util = houston_core::usage::read_utilization(accs);
         self.util = util.into_iter().map(|u| (u.id.clone(), u)).collect();
         self.loaded = true;
+    }
+
+    /// Show what the cache has and ask for newer numbers in the background.
+    /// `force` is the `r` key: an explicit ask re-probes however fresh the
+    /// cache is.
+    fn probe(&mut self, accs: &[accounts::Account], force: bool) {
+        self.reload(accs);
+        let ttl = if force { Duration::ZERO } else { QUOTA_TTL };
+        spawn_probe(accs.to_vec(), ttl, Duration::from_secs(3), std::sync::Arc::clone(&self.fresh));
     }
 }
 
@@ -247,7 +299,7 @@ impl Widget for AccountsWidget {
             }
             'r' => {
                 world.accounts = accounts::load().unwrap_or_default();
-                self.probe(&world.accounts);
+                self.probe(&world.accounts, true);
                 true
             }
             _ => false,
@@ -261,7 +313,10 @@ impl Widget for AccountsWidget {
     fn on_scroll(&mut self, _up: bool, _w: &mut World) {}
     fn post_render(&mut self, _area: Rect, world: &World, _focused: bool) {
         if !self.loaded {
-            self.probe(&world.accounts);
+            self.probe(&world.accounts, false);
+        } else if self.fresh.swap(false, std::sync::atomic::Ordering::Acquire) {
+            // A background probe landed: pick it up without probing again.
+            self.reload(&world.accounts);
         }
     }
     fn commands(&self) -> Vec<Command> {

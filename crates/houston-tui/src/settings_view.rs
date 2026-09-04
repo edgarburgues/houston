@@ -72,7 +72,8 @@ pub struct SettingsWidget {
     /// Text buffer while typing a value.
     editing: Option<String>,
     /// (key, value before the write) for account-scope changes, newest last.
-    undo: Vec<(&'static str, Option<Value>)>,
+    /// For `u`, most recent last. See [`UndoStep`].
+    undo: Vec<UndoStep>,
     /// What the last action did, shown in the pane rather than the footer so it
     /// survives the next keystroke.
     said: String,
@@ -162,7 +163,10 @@ impl SettingsWidget {
                 }
                 (Kind::Action(_), Owner::ClaudeSettings) => {
                     let r = cs::retention(&accs);
-                    format!("{} days", r.days)
+                    // Whether the number is a DECISION or Claude's default is
+                    // what the toggle keys off, so the row has to say which:
+                    // "30 days" read identically either way.
+                    format!("{} days ({})", r.days, if r.explicit { "set" } else { "Claude's default" })
                 }
                 _ => Self::shown_value(entry, value.as_ref(), preset),
             };
@@ -267,7 +271,8 @@ impl SettingsWidget {
     /// Apply a value to every account, remembering the previous one for `u`.
     fn write_fleet(&mut self, world: &World, key: &'static str, value: Option<Value>) {
         let accs = self.accounts(world);
-        let before = accs.first().and_then(|a| policy::get(a, key));
+        let before: Vec<(String, Option<Value>)> =
+            accs.iter().map(|a| (a.id.clone(), policy::get(a, key))).collect();
         let res = policy::set_everywhere(&accs, key, value.as_ref());
         let failed: Vec<String> = res
             .iter()
@@ -322,13 +327,33 @@ impl SettingsWidget {
                 // changes retention on its own (Phase 0.3). Pressing it again puts
                 // it back to Claude's default, so the action is reversible.
                 let r = cs::retention(&accs);
-                let target = if r.explicit && r.days == KEEP_FOREVER_DAYS { None } else { Some(KEEP_FOREVER_DAYS) };
+                // An explicit value that is NOT the one this key writes is
+                // somebody's decision, and a two-state toggle has no business
+                // overwriting it. `houston retention --keep 1000` had written
+                // exactly that in four config dirs; this row counted it as "not
+                // kept", so one Enter replaced it with 3650 and a second
+                // dropped the key entirely — 1000 days of history down to
+                // Claude's 30, in two keystrokes and no confirmation.
+                if r.explicit && r.days != KEEP_FOREVER_DAYS {
+                    self.said = format!(
+                        "retention is already set to {} days; leaving it alone.                          `houston retention --keep <days>` changes it",
+                        r.days
+                    );
+                    self.at = None;
+                    return;
+                }
+                let target = if r.explicit { None } else { Some(KEEP_FOREVER_DAYS) };
                 let res = cs::set_cleanup_period(&accs, target);
                 let bad: Vec<String> = res.iter().filter_map(|(id, r)| r.as_ref().err().map(|e| format!("{id}: {e}"))).collect();
                 self.said = if bad.is_empty() {
+                    // `res.len()`, not `accs.len()`: the write spans the same set
+                    // the report folds — the accounts AND `~/.claude` when that
+                    // holds transcripts of its own — so the accounts list names
+                    // fewer dirs than were actually written. Measured rather
+                    // than re-derived.
                     match target {
-                        Some(d) => format!("history kept for {d} days in {} accounts", accs.len()),
-                        None => "retention back to Claude's default".into(),
+                        Some(d) => format!("history kept for {d} days in {} config dirs", res.len()),
+                        None => format!("retention back to Claude's default in {} config dirs", res.len()),
                     }
                 } else {
                     bad.join(" · ")
@@ -419,14 +444,48 @@ impl SettingsWidget {
             return;
         };
         let accs = self.accounts(world);
-        let _ = policy::set_everywhere(&accs, key, before.as_ref());
-        self.said = match before {
-            Some(v) => format!("{key} back to {}", trim_value(&v)),
-            None => format!("{key} unset again"),
+        // Each account gets its OWN previous value back. And the results are
+        // collected, not `let _ =`: an undo that failed used to still announce
+        // the value was restored, which is the one thing an undo must not do.
+        let mut failed: Vec<String> = Vec::new();
+        let mut done = 0;
+        for (id, prev) in &before {
+            let Some(a) = accs.iter().find(|a| &a.id == id) else {
+                failed.push(format!("account-{id}: gone since the change"));
+                continue;
+            };
+            for (id, r) in policy::set_everywhere(std::slice::from_ref(a), key, prev.as_ref()) {
+                match r {
+                    Ok(_) => done += 1,
+                    Err(e) => failed.push(format!("account-{id}: {e}")),
+                }
+            }
+        }
+        self.said = if !failed.is_empty() {
+            failed.join(" · ")
+        } else {
+            // Only claim a single value when every account really had it; a
+            // `(differs)` key went back to several, and saying otherwise would
+            // misdescribe what is now on disk.
+            let what = match before.split_first() {
+                Some(((_, first), rest)) if rest.iter().all(|(_, v)| v == first) => {
+                    first.as_ref().map(trim_value).unwrap_or_else(|| "unset".into())
+                }
+                _ => "its previous per-account values".into(),
+            };
+            format!("{key} back to {what} in {done} accounts")
         };
         self.at = None;
     }
 }
+
+/// One undoable change: the key, and what each account held before it.
+///
+/// Per account, not one value for the fleet. Remembering only `accounts[0]`'s
+/// value and replaying it everywhere is an undo that destroys data: on a key
+/// the screen marks `(differs)`, it overwrote every other account with account
+/// 0's value and reported success, leaving no entry to undo THAT with.
+type UndoStep = (&'static str, Vec<(String, Option<Value>)>);
 
 /// A JSON value on one line, short enough for a status message.
 fn trim_value(v: &Value) -> String {
@@ -434,11 +493,7 @@ fn trim_value(v: &Value) -> String {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     };
-    if s.chars().count() > 24 {
-        format!("{}…", s.chars().take(23).collect::<String>())
-    } else {
-        s
-    }
+    houston_core::text::clip(&s, 24)
 }
 
 impl Widget for SettingsWidget {
@@ -675,6 +730,154 @@ mod tests {
         let mut w = SettingsWidget::default();
         w.gather(&world);
         (w, world)
+    }
+
+    /// Accounts whose config dirs are throwaway directories, so a test that
+    /// WRITES settings cannot reach the real ones. Returns the tempdir, which
+    /// the caller has to keep alive.
+    fn fake_accounts(bodies: &[(&str, &str)]) -> (tempfile::TempDir, Vec<Account>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let accs = bodies
+            .iter()
+            .map(|(id, body)| {
+                let d = tmp.path().join(id);
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::write(d.join("settings.json"), body).unwrap();
+                Account { id: (*id).into(), config_dir: d.to_string_lossy().into_owned(), ..Default::default() }
+            })
+            .collect();
+        (tmp, accs)
+    }
+
+    /// The isolation this crate's retention tests depend on, asserted rather
+    /// than assumed. `claude_settings::default_config_scope` reaches
+    /// `~/.claude` without anybody passing it, its `cfg!(test)` guard does not
+    /// cover this crate, and a test here deleted a real `cleanupPeriodDays`
+    /// because of it. If this ever stops holding, the tests below start writing
+    /// to the developer's config dir again — so it gets its own assertion
+    /// instead of being a comment.
+    #[test]
+    fn the_test_setup_keeps_claude_settings_off_the_real_config_dir() {
+        let (_tmp, accs) = fake_accounts(&[("a", "{}"), ("b", "{}")]);
+        assert_eq!(
+            std::env::var("HOUSTON_DEFAULT_SCOPE").as_deref(),
+            Ok("0"),
+            "test setup must disable the ambient ~/.claude participant"
+        );
+        let r = cs::retention(&accs);
+        assert_eq!(r.accounts, accs.len(), "an ambient config dir joined the fold");
+        assert!(!r.includes_default, "the real ~/.claude must take no part in a test");
+    }
+
+    /// The undo used to remember only `accounts[0]`'s value and replay it
+    /// everywhere. On a key the screen marks `(differs)`, that DESTROYED the
+    /// other accounts' values — and reported success, so there was no entry
+    /// left to undo it with.
+    #[test]
+    fn undo_gives_each_account_its_own_value_back() {
+        let (_tmp, accs) = fake_accounts(&[("a", r#"{"theme":"dark"}"#), ("b", r#"{"theme":"light"}"#)]);
+        let mut world = crate::world::tests::test_world();
+        world.accounts = accs.clone();
+        let mut w = SettingsWidget::default();
+
+        w.write_fleet(&world, "theme", Some(Value::from("daltonized")));
+        assert!(w.said.contains("daltonized"), "{}", w.said);
+        for a in &accs {
+            assert_eq!(policy::get(a, "theme"), Some(Value::from("daltonized")));
+        }
+
+        w.undo_last(&world);
+        assert_eq!(policy::get(&accs[0], "theme"), Some(Value::from("dark")));
+        assert_eq!(policy::get(&accs[1], "theme"), Some(Value::from("light")), "account b got account a's value");
+        // And it must not claim a single value it did not restore.
+        assert!(!w.said.contains("dark"), "a per-account undo must not name one value: {}", w.said);
+        assert!(w.said.contains("per-account"), "{}", w.said);
+
+        // A key they DO agree on still reads naturally.
+        w.write_fleet(&world, "editorMode", Some(Value::from("vim")));
+        w.undo_last(&world);
+        assert!(w.said.contains("unset"), "{}", w.said);
+        assert_eq!(policy::get(&accs[0], "editorMode"), None);
+    }
+
+    /// An undo whose write fails must say so, not announce a restore that did
+    /// not happen. It used to discard the results with `let _ =`.
+    #[test]
+    fn a_failed_undo_reports_the_failure() {
+        let (_tmp, accs) = fake_accounts(&[("a", r#"{"theme":"dark"}"#)]);
+        let mut world = crate::world::tests::test_world();
+        world.accounts = accs.clone();
+        let mut w = SettingsWidget::default();
+        w.write_fleet(&world, "theme", Some(Value::from("light")));
+
+        // The account's config dir is unreachable by the time `u` is pressed.
+        world.accounts = vec![Account { id: "a".into(), config_dir: "Z:\\definitely\\not\\here".into(), ..Default::default() }];
+        w.undo_last(&world);
+        assert!(w.said.contains("account-a"), "the failing account is named: {}", w.said);
+        assert!(!w.said.contains("back to"), "a failed undo must not claim a restore: {}", w.said);
+    }
+
+    /// `houston retention --keep 1000` wrote an explicit 1000 in four config
+    /// dirs. This row counted anything that was not 3650 as "not kept", so one
+    /// Enter replaced it with 3650 and a second dropped the key entirely —
+    /// 1000 days of history down to Claude's 30, in two keystrokes.
+    #[test]
+    fn the_retention_row_leaves_an_explicit_value_alone() {
+        let (_tmp, accs) = fake_accounts(&[("a", r#"{"cleanupPeriodDays":1000}"#)]);
+        let mut world = crate::world::tests::test_world();
+        world.accounts = accs.clone();
+        let mut w = SettingsWidget::default();
+        let entry = schema::find("cleanupPeriodDays").expect("the retention row exists");
+
+        w.act(&world, entry);
+        assert_eq!(
+            cs::cleanup_period_days(&accs[0]),
+            Some(1000),
+            "a value somebody set was overwritten by the toggle"
+        );
+        assert!(w.said.contains("1000"), "the message says what is there: {}", w.said);
+        assert!(w.said.contains("houston retention"), "and where to change it: {}", w.said);
+
+        // Pressing again does not creep either: the answer is stable.
+        w.act(&world, entry);
+        assert_eq!(cs::cleanup_period_days(&accs[0]), Some(1000));
+    }
+
+    /// The other half: with nothing set, the row still does its job, and
+    /// pressing it twice is the reversible toggle it advertises.
+    #[test]
+    fn the_retention_row_still_toggles_when_nothing_is_set() {
+        let (_tmp, accs) = fake_accounts(&[("a", "{}")]);
+        let mut world = crate::world::tests::test_world();
+        world.accounts = accs.clone();
+        let mut w = SettingsWidget::default();
+        let entry = schema::find("cleanupPeriodDays").expect("the retention row exists");
+
+        w.act(&world, entry);
+        assert_eq!(cs::cleanup_period_days(&accs[0]), Some(KEEP_FOREVER_DAYS));
+        w.act(&world, entry);
+        assert_eq!(cs::cleanup_period_days(&accs[0]), None, "back to Claude's default");
+    }
+
+    /// The row has to distinguish a decision from an inherited default: "30
+    /// days" read identically either way, and it is what the toggle keys off.
+    #[test]
+    fn the_retention_row_says_whether_the_value_was_set() {
+        let (_tmp, accs) = fake_accounts(&[("a", r#"{"cleanupPeriodDays":1000}"#)]);
+        let mut world = crate::world::tests::test_world();
+        world.accounts = accs;
+        let mut w = SettingsWidget::default();
+        w.gather(&world);
+        let shown = w
+            .rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Setting { entry, shown, .. } if entry.key == "cleanupPeriodDays" => Some(shown.clone()),
+                _ => None,
+            })
+            .expect("the retention row exists");
+        assert!(shown.contains("1000 days"), "{shown}");
+        assert!(shown.contains("set"), "{shown}");
     }
 
     #[test]

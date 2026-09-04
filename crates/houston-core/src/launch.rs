@@ -64,11 +64,45 @@ fn which(cmd: &str) -> Option<PathBuf> {
 }
 
 /// The Claude config dir that physically holds a transcript: the parent of the
-/// ".../projects/..." segment. None if it can't tell (→ claude's default).
-fn config_dir_of(transcript_path: &str) -> Option<PathBuf> {
+/// ".../projects/..." segment, but only when that parent really is a config
+/// dir. None if it can't tell (→ claude's default, which is always safe).
+///
+/// **Being the parent of a `projects/` directory does not make a directory a
+/// config dir.** The scan's roots deliberately include
+/// `~/.claude-shared/projects`, and the shared store is pure DATA: every
+/// account junctions its own `projects` into it. Handing it to claude as
+/// `CLAUDE_CONFIG_DIR` — which is what happened with no account logged in —
+/// makes claude run onboarding and write `.credentials.json` INSIDE the
+/// directory every account links to, i.e. one account's credential in the one
+/// place all of them read.
+///
+/// So the candidate has to prove itself: either Houston already knows it as an
+/// account's config dir, or it carries a file only a config dir has. Falling
+/// through to claude's default is the correct answer otherwise; guessing is not.
+fn config_dir_of(transcript_path: &str, accs: &[Account]) -> Option<PathBuf> {
     let p = transcript_path.replace('\\', "/");
     let i = p.rfind("/projects/")?;
-    Some(PathBuf::from(&transcript_path[..i]))
+    let cand = PathBuf::from(&transcript_path[..i]);
+    is_config_dir(&cand, accs).then_some(cand)
+}
+
+/// Whether `cand` is a Claude config dir rather than a directory that merely
+/// holds transcripts.
+fn is_config_dir(cand: &Path, accs: &[Account]) -> bool {
+    // Checked FIRST and unconditionally: the shared store is a data store by
+    // construction, and it is the candidate this whole check exists to reject.
+    // Order matters because `same_path` canonicalizes, so an account dir whose
+    // own path resolves into the shared store must still lose here.
+    if accounts::same_path(cand, &crate::heal::shared_dir()) {
+        return false;
+    }
+    if accs.iter().filter_map(|a| a.resolve_config_dir()).any(|d| accounts::same_path(cand, &d)) {
+        return true;
+    }
+    // `.claude.json` is claude's own per-config-dir state and `settings.json`
+    // its settings; either one is written by claude into a config dir and
+    // nowhere else.
+    cand.join(".claude.json").is_file() || cand.join("settings.json").is_file()
 }
 
 /// A `claude --resume <session>` command in the mission's working dir (v1
@@ -85,7 +119,7 @@ fn config_dir_of(transcript_path: &str) -> Option<PathBuf> {
 /// decision threw away the reading the screen was showing.
 pub fn resume_command(session_id: &str, cwd: &str, transcript_path: &str, prefs: &Launch) -> Command {
     let accs = accounts::load().unwrap_or_default();
-    let logged: Vec<Account> = accs.into_iter().filter(|a| a.logged_in()).collect();
+    let logged: Vec<Account> = accs.iter().filter(|a| a.logged_in()).cloned().collect();
     let (config_dir, account, how) = if !logged.is_empty() {
         let d = usage::best_cached(&logged).or_else(|| usage::best(&logged, Duration::from_secs(4)));
         match d {
@@ -93,10 +127,10 @@ pub fn resume_command(session_id: &str, cwd: &str, transcript_path: &str, prefs:
                 let _ = accounts::touch_last_use(&d.account.id, &now_stamp());
                 (d.account.resolve_config_dir(), d.account.id.clone(), d.how)
             }
-            None => (config_dir_of(transcript_path), String::new(), Pick::TranscriptOwner),
+            None => (config_dir_of(transcript_path, &accs), String::new(), Pick::TranscriptOwner),
         }
     } else {
-        (config_dir_of(transcript_path), String::new(), Pick::TranscriptOwner)
+        (config_dir_of(transcript_path, &accs), String::new(), Pick::TranscriptOwner)
     };
 
     // Record the decision, not just its effect. The account used to be
@@ -293,6 +327,72 @@ mod tests {
         assert!(rec[0].account.is_empty(), "no account was chosen, so none is claimed");
 
         unsafe { std::env::remove_var("HOUSTON_HOME") };
+    }
+
+    /// The credential hazard. `~/.claude-shared` is one of the scan's roots and
+    /// a pure DATA store every account junctions into, so "the config dir that
+    /// owns this transcript" used to resolve straight to it whenever no account
+    /// was logged in. Handed to claude as `CLAUDE_CONFIG_DIR`, that is
+    /// onboarding and `.credentials.json` written in the one directory every
+    /// account reads.
+    #[test]
+    fn the_shared_store_is_never_mistaken_for_a_config_dir() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = tmp.path().join(".claude-shared");
+        std::fs::create_dir_all(shared.join("projects").join("p")).unwrap();
+        unsafe {
+            std::env::set_var("HOUSTON_HOME", tmp.path());
+            std::env::set_var("HOUSTON_SHARED_DIR", &shared);
+        }
+
+        let t = shared.join("projects").join("p").join("s.jsonl").to_string_lossy().into_owned();
+        assert_eq!(config_dir_of(&t, &[]), None, "the shared store must never be chosen");
+
+        // Still rejected with the marker files present: a junction can put them
+        // there, so the rejection has to be unconditional rather than a
+        // tiebreak.
+        std::fs::write(shared.join("settings.json"), "{}").unwrap();
+        std::fs::write(shared.join(".claude.json"), "{}").unwrap();
+        assert_eq!(config_dir_of(&t, &[]), None, "a marker file must not rehabilitate the shared store");
+
+        // End to end: a resume must clear the variable, not point it there.
+        let cmd = resume_command("s", "", &t, &Launch::default());
+        let exported = cmd.get_envs().find(|(k, _)| *k == std::ffi::OsStr::new("CLAUDE_CONFIG_DIR")).map(|(_, v)| v);
+        assert_eq!(exported, Some(None), "CLAUDE_CONFIG_DIR must be cleared, never set to the shared store");
+
+        unsafe {
+            std::env::remove_var("HOUSTON_SHARED_DIR");
+            std::env::remove_var("HOUSTON_HOME");
+        }
+    }
+
+    /// The other half of the same check: a real config dir must still be
+    /// recognised, or a resume with nothing logged in would open the transcript
+    /// under claude's default config dir instead of the one that owns it.
+    #[test]
+    fn a_real_config_dir_is_still_accepted() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("HOUSTON_SHARED_DIR", tmp.path().join("elsewhere")) };
+
+        let dir = tmp.path().join("account-work");
+        std::fs::create_dir_all(dir.join("projects").join("p")).unwrap();
+        let t = dir.join("projects").join("p").join("s.jsonl").to_string_lossy().into_owned();
+
+        // A directory that merely holds transcripts proves nothing.
+        assert_eq!(config_dir_of(&t, &[]), None);
+
+        // Being in the registry is proof on its own — an account dir need not
+        // have been launched yet for a resume to belong to it.
+        let acc = Account { id: "work".into(), config_dir: dir.to_string_lossy().into_owned(), ..Default::default() };
+        assert_eq!(config_dir_of(&t, std::slice::from_ref(&acc)).as_deref(), Some(dir.as_path()));
+
+        // So is carrying claude's own per-config-dir state, registry or not.
+        std::fs::write(dir.join(".claude.json"), "{}").unwrap();
+        assert_eq!(config_dir_of(&t, &[]).as_deref(), Some(dir.as_path()));
+
+        unsafe { std::env::remove_var("HOUSTON_SHARED_DIR") };
     }
 
     #[test]

@@ -15,18 +15,7 @@ use ratatui::{
     Frame,
 };
 
-fn clip(s: &str, w: usize) -> String {
-    let mut out = String::new();
-    for (used, ch) in s.chars().enumerate() {
-        if used + 1 > w {
-            out.pop();
-            out.push('…');
-            return out;
-        }
-        out.push(ch);
-    }
-    out
-}
+use houston_core::text::clip;
 
 use crate::world::Filter;
 

@@ -599,14 +599,24 @@ fn choose_account(
     houston_core::usage::best(&logged, std::time::Duration::from_secs(8)).map(|d| (d.account, d.how))
 }
 
-pub fn run(args: &[String]) -> anyhow::Result<()> {
-    // Split our flags from claude passthrough args at `--`.
+/// Split Houston's own flags from the claude passthrough args at `--`.
+///
+/// `-a` with no value is an ERROR, not a shrug. `-a` is how you say "this
+/// account and no other", so a missing value falling through to `None` made
+/// Houston balance to whichever account looked cheapest — the exact opposite of
+/// what was asked, silently. A value that is plainly the next flag was never an
+/// account id either, and taking it would also swallow the flag.
+fn split_run_args(args: &[String]) -> anyhow::Result<(Option<String>, Vec<String>)> {
     let mut forced: Option<String> = None;
     let mut passthrough: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--account" | "-a" => forced = it.next().cloned(),
+            "--account" | "-a" => match it.next() {
+                Some(v) if !v.starts_with('-') => forced = Some(v.clone()),
+                Some(v) => return Err(anyhow!("{a} needs an account id, but got the flag {v:?}")),
+                None => return Err(anyhow!("{a} needs an account id")),
+            },
             "--" => {
                 passthrough.extend(it.by_ref().cloned());
                 break;
@@ -614,6 +624,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             other => passthrough.push(other.to_string()),
         }
     }
+    Ok((forced, passthrough))
+}
+
+pub fn run(args: &[String]) -> anyhow::Result<()> {
+    let (forced, passthrough) = split_run_args(args)?;
 
     let accs = accounts::load().unwrap_or_default();
     // Repair drifted data links before handing the terminal over, so the
@@ -1417,10 +1432,17 @@ fn block_bar(pct: f64, ok: bool, styled: bool) -> String {
 /// Takes the already-loaded registry: the status line reads it once per render,
 /// and `accounts::active_id()` (the shared version, used by hooks) would read it
 /// a second time.
+/// The account whose config dir the current session is running under.
+///
+/// Path comparison goes through `accounts::same_path`. The inline version here
+/// wrote `canonicalize(&d).ok() == canonicalize(&cd).ok()`, which is true when
+/// BOTH fail — `None == None` — so any account with an unresolvable config dir
+/// matched an unresolvable `CLAUDE_CONFIG_DIR` and the status line named the
+/// wrong account.
 fn active_account_id(accs: &[accounts::Account]) -> Option<String> {
     let cd = PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR")?);
     accs.iter()
-        .find(|a| a.resolve_config_dir().is_some_and(|d| d == cd || std::fs::canonicalize(&d).ok() == std::fs::canonicalize(&cd).ok()))
+        .find(|a| a.resolve_config_dir().is_some_and(|d| accounts::same_path(&d, &cd)))
         .map(|a| a.id.clone())
 }
 
@@ -1438,6 +1460,39 @@ mod tests {
 
     fn acc(id: &str, last: &str, cfg: &str) -> Account {
         Account { id: id.into(), last_use: last.into(), config_dir: cfg.into(), ..Default::default() }
+    }
+
+    /// `-a` with no value used to leave `forced` as None and balance in
+    /// silence — picking a DIFFERENT account than the one the flag was there to
+    /// insist on.
+    #[test]
+    fn a_dash_a_without_a_value_is_an_error_not_a_shrug() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let (forced, rest) = split_run_args(&v(&["-a", "work", "--verbose"])).unwrap();
+        assert_eq!(forced.as_deref(), Some("work"));
+        assert_eq!(rest, vec!["--verbose"]);
+
+        // Nothing after it.
+        let e = split_run_args(&v(&["-a"])).expect_err("must not balance silently");
+        assert!(e.to_string().contains("needs an account id"), "{e}");
+        let e = split_run_args(&v(&["--account"])).expect_err("same for the long form");
+        assert!(e.to_string().contains("needs an account id"), "{e}");
+
+        // The next FLAG is not an account id, and eating it would lose it too.
+        let e = split_run_args(&v(&["-a", "--verbose"])).expect_err("must not eat the flag");
+        assert!(e.to_string().contains("--verbose"), "the message names what it got: {e}");
+
+        // `--` still ends Houston's own flags and passes the rest through
+        // untouched, dashes and all.
+        let (forced, rest) = split_run_args(&v(&["-a", "work", "--", "-a", "not-ours"])).unwrap();
+        assert_eq!(forced.as_deref(), Some("work"));
+        assert_eq!(rest, vec!["-a", "not-ours"]);
+
+        // And no flag at all still means "balance", which is the default.
+        let (forced, rest) = split_run_args(&v(&[])).unwrap();
+        assert!(forced.is_none());
+        assert!(rest.is_empty());
     }
 
     #[test]

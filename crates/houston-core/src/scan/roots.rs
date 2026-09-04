@@ -15,35 +15,57 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Every projects directory worth scanning. Non-existent ones are dropped.
+/// Every projects directory worth scanning. Non-existent ones are dropped, and
+/// so are repeats — an account reached both by its registry entry and by the
+/// conventional sweep is one root.
+///
+/// Every location comes from the accessor that OWNS it rather than from a
+/// literal path. That is the whole change here: this function used to spell
+/// `~/.claude-shared` and `~/.claude-accounts` itself, so `$HOUSTON_SHARED_DIR`
+/// and `$HOUSTON_ACCOUNTS_DIR` moved the store while the scan kept reading the
+/// old place, and an account with an explicit `configDir` was invisible to the
+/// scan no matter what. Two halves of Houston disagreeing about where the
+/// conversations live is not a bug that announces itself — it just shows fewer
+/// missions than exist.
 pub fn project_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    let mut add = |p: PathBuf| {
-        if p.is_dir() {
-            roots.push(p);
-        }
-    };
+    let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(cd) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         if !cd.is_empty() {
-            add(PathBuf::from(cd).join("projects"));
+            push_root(&mut roots, PathBuf::from(cd).join("projects"));
         }
     }
-    let h = home();
-    add(h.join(".claude").join("projects"));
-    add(h.join(".claude-shared").join("projects"));
-    if let Ok(entries) = fs::read_dir(h.join(".claude-accounts")) {
-        let mut names: Vec<String> = entries
+    push_root(&mut roots, home().join(".claude").join("projects"));
+    push_root(&mut roots, crate::heal::shared_dir().join("projects"));
+    // Registered accounts by their RESOLVED config dir, so an explicit
+    // `configDir` is followed wherever it points.
+    for a in crate::accounts::load().unwrap_or_default() {
+        if let Some(d) = a.resolve_config_dir() {
+            push_root(&mut roots, d.join("projects"));
+        }
+    }
+    // Then the conventional sweep, which still earns its keep: a dir left by a
+    // removed account, or a half-finished provision, holds conversations that
+    // no registry entry points at any more.
+    if let Ok(entries) = fs::read_dir(crate::accounts::accounts_dir()) {
+        let mut dirs: Vec<PathBuf> = entries
             .flatten()
             .filter(|e| e.path().is_dir())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with("account-"))
+            .filter(|e| e.file_name().to_string_lossy().starts_with("account-"))
+            .map(|e| e.path())
             .collect();
-        names.sort();
-        for n in names {
-            add(h.join(".claude-accounts").join(n).join("projects"));
+        dirs.sort();
+        for d in dirs {
+            push_root(&mut roots, d.join("projects"));
         }
     }
     roots
+}
+
+/// Add a root if it exists and is not already listed.
+fn push_root(roots: &mut Vec<PathBuf>, p: PathBuf) {
+    if p.is_dir() && !roots.contains(&p) {
+        roots.push(p);
+    }
 }
 
 /// Scan one root, reusing cached parses for unchanged transcripts when a
@@ -117,7 +139,58 @@ pub fn scan_all() -> Vec<Mission> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts::Account;
     use std::io::Write;
+
+    /// The roots have to come from the accessors that own each location, or a
+    /// relocated store is simply invisible: `$HOUSTON_SHARED_DIR` and
+    /// `$HOUSTON_ACCOUNTS_DIR` moved the store while this function kept reading
+    /// the literal `~/.claude-shared` and `~/.claude-accounts`, and an account
+    /// with an explicit `configDir` was never scanned at all.
+    #[test]
+    fn project_roots_follow_the_overrides_and_an_explicit_config_dir() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |p: &Path| {
+            fs::create_dir_all(p.join("projects")).unwrap();
+            p.join("projects")
+        };
+        let shared = mk(&tmp.path().join("shared"));
+        let accs_dir = tmp.path().join("accs");
+        let conventional = mk(&accs_dir.join("account-conv"));
+        // An account whose configDir points somewhere the sweep cannot reach.
+        let elsewhere = mk(&tmp.path().join("way-over-here"));
+
+        unsafe {
+            std::env::set_var("HOUSTON_HOME", tmp.path());
+            std::env::set_var("HOUSTON_SHARED_DIR", tmp.path().join("shared"));
+            std::env::set_var("HOUSTON_ACCOUNTS_DIR", &accs_dir);
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        }
+        crate::accounts::save(&[
+            Account { id: "conv".into(), ..Default::default() },
+            Account {
+                id: "odd".into(),
+                config_dir: tmp.path().join("way-over-here").to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+
+        let roots = project_roots();
+        assert!(roots.contains(&shared), "the relocated shared store is not scanned: {roots:?}");
+        assert!(roots.contains(&elsewhere), "an explicit configDir is not scanned: {roots:?}");
+        assert!(roots.contains(&conventional), "the conventional sweep still applies: {roots:?}");
+        // The conventional account is reachable twice (registry + sweep) and
+        // must appear once, or every mission in it gets parsed twice.
+        assert_eq!(roots.iter().filter(|r| *r == &conventional).count(), 1, "{roots:?}");
+
+        unsafe {
+            std::env::remove_var("HOUSTON_SHARED_DIR");
+            std::env::remove_var("HOUSTON_ACCOUNTS_DIR");
+            std::env::remove_var("HOUSTON_HOME");
+        }
+    }
 
     #[test]
     fn scan_root_finds_sorts_and_skips_subagents() {

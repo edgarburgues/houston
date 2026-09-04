@@ -11,8 +11,14 @@
 //! - **The rename installs the TEMP file's permissions**, not the target's. So
 //!   creating the temp with the default umask silently WIDENS a 0600 file on
 //!   every write, which is how a credential store quietly became world-readable
-//!   once. When the destination exists, its mode is copied onto the temp before
-//!   the rename.
+//!   once. The temp is therefore CREATED with the destination's mode (0600 when
+//!   there is no destination yet) rather than chmod'ed afterwards — patching it
+//!   after the write still leaves the contents exposed while the write runs.
+//!
+//! This is the one atomic writer in the crate. There used to be three: this
+//! one, a copy in `accounts` that got the mode right, and a hand-rolled
+//! temp+rename for the refresh stamp in `usage`. Three writers meant the
+//! lesson above was learned in one of them and not the others.
 
 use std::fs;
 use std::io;
@@ -26,11 +32,29 @@ pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // Hidden and pid-tagged: unique per writer, and never mistaken for content
     // by a directory listing that globs for the real name.
     let tmp = dir.join(format!(".{base}.{}.tmp", std::process::id()));
-    fs::write(&tmp, bytes)?;
-    if let Ok(meta) = fs::metadata(path) {
-        // Best effort: a filesystem that cannot carry the mode is not a reason
-        // to fail the write, but it IS a reason to try before renaming.
-        let _ = fs::set_permissions(&tmp, meta.permissions());
+    // A temp left by a previous crash of this same pid would be REOPENED
+    // below, keeping whatever mode it already had, so it goes first.
+    let _ = fs::remove_file(&tmp);
+
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        // The mode is set when the temp is CREATED, not patched afterwards.
+        // Writing under the default umask and chmod'ing after still exposes
+        // the new contents for the length of the write, and for a credential
+        // file that is the whole problem rather than a smaller version of it.
+        // An existing destination lends its mode; a new file gets 0600,
+        // because everything routed through here is Houston's own state.
+        let mode = fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+        opts.mode(mode);
+    }
+    {
+        use io::Write;
+        let mut f = opts.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.flush()?;
     }
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),

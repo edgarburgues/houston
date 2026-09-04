@@ -24,10 +24,17 @@ pub fn is_http(s: &str) -> bool {
 /// report `claude.ai`, so a lookalike host could impersonate a login URL.
 fn host_and_path(s: &str) -> Option<(String, String)> {
     // Case-insensitive scheme, without allocating for the whole URL.
-    let rest = ["https://", "http://"].iter().find_map(|scheme| {
-        let n = scheme.len();
-        (s.len() >= n && s[..n].eq_ignore_ascii_case(scheme)).then(|| &s[n..])
-    })?;
+    //
+    // `get(..n)`, never `s[..n]`: slicing by byte index panics when the index
+    // lands inside a multibyte character, and an IDN host puts one right there
+    // — `http://école.example/` is "byte index 8 is not a char boundary". This
+    // is reached from `$BROWSER`, so the caller who would trip it is claude
+    // opening a link, not a person typing. A non-boundary is also simply not
+    // the ASCII scheme, so returning None is the right answer as well as the
+    // safe one.
+    let rest = ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| s.get(..scheme.len()).filter(|p| p.eq_ignore_ascii_case(scheme)).map(|_| &s[scheme.len()..]))?;
     // 1. The authority is everything up to the first path/query/fragment mark.
     let (authority, path) = match rest.find(['/', '?', '#']) {
         Some(i) => (&rest[..i], &rest[i..]),
@@ -256,6 +263,23 @@ mod tests {
         assert!(!is_http("ftp://example.com"));
         assert!(!is_http("https://"), "no host");
         assert!(!is_http(""));
+    }
+
+    /// An IDN host puts a multibyte character exactly where the scheme test
+    /// used to slice by byte, and `&s[..8]` panics on a non-boundary. Houston
+    /// is the child's `$BROWSER`, so the caller who tripped this was claude
+    /// opening a link.
+    #[test]
+    fn an_idn_host_does_not_panic_the_scheme_test() {
+        // 'é' straddles bytes 7..9, so 8 — the length of "https://" — is not a
+        // char boundary. Both schemes have to be safe to probe.
+        assert!(is_http("http://école.example/"));
+        assert!(is_http("https://école.example/"));
+        assert_eq!(host_and_path("http://école.example/x").unwrap().0, "école.example");
+        // And a non-URL whose first bytes are multibyte is still just a no.
+        assert!(!is_http("émile"));
+        assert!(!is_http("ét"));
+        assert!(!is_http("é"));
     }
 
     #[test]

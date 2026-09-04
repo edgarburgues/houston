@@ -321,14 +321,7 @@ pub fn render(frame: &mut Frame, body: Rect, world: &World, o: &Options) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn clip(s: &str, w: usize) -> String {
-    if s.chars().count() <= w {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(w.saturating_sub(1)).collect();
-    out.push('…');
-    out
-}
+use houston_core::text::clip;
 
 #[cfg(test)]
 mod tests {

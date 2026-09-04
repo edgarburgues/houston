@@ -164,6 +164,18 @@ pub struct Config {
     /// Houston only ever reads them, because a render may not execute anything.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub segments: Vec<SegmentConfig>,
+    /// Set when the file EXISTED but could not be parsed, so this value is the
+    /// default standing in for content that is still on disk.
+    ///
+    /// It exists to make `save_to` refuse. Without it the sequence is: a typo in
+    /// a hand-edited config → load falls back to the default in memory → the
+    /// first border drag persists → the real config is gone, replaced by
+    /// defaults, with nothing on screen having said so. A single mistyped comma
+    /// should not cost a layout.
+    ///
+    /// `skip` on both sides: it is a fact about THIS load, never content.
+    #[serde(skip)]
+    pub unreadable: bool,
 }
 
 /// One configured status-line segment.
@@ -203,7 +215,13 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { theme: Theme::default(), layout: default_layout(), tabs: Vec::new(), segments: Vec::new() }
+        Config {
+            theme: Theme::default(),
+            layout: default_layout(),
+            tabs: Vec::new(),
+            segments: Vec::new(),
+            unreadable: false,
+        }
     }
 }
 
@@ -250,6 +268,7 @@ impl Config {
             // No segments by default: one is only useful once something writes it,
             // and a configured-but-never-written segment is invisible anyway.
             segments: Vec::new(),
+            unreadable: false,
         }
     }
 
@@ -346,8 +365,16 @@ impl Config {
             Ok(b) => {
                 // Strip a UTF-8 BOM some editors prepend; serde would reject it.
                 let b = b.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&b);
-                serde_json::from_slice(b).unwrap_or_default()
+                match serde_json::from_slice(b) {
+                    Ok(cfg) => cfg,
+                    // The file is THERE and unreadable. Standing in with the
+                    // default is right for rendering, but the default must not
+                    // be allowed to overwrite it — see `Config::unreadable`.
+                    Err(_) => Config { unreadable: true, ..Config::default() },
+                }
             }
+            // Genuinely absent: the default is the whole truth, and saving it is
+            // exactly what first-run provisioning does.
             Err(_) => Config::default(),
         }
     }
@@ -361,20 +388,105 @@ impl Config {
         self.save_to(&config_path())
     }
 
+    /// Write the config, atomically.
+    ///
+    /// Two things this must not do, both learned from real damage:
+    ///
+    /// - **Never a fixed temp name.** This used to write `config-v2.json.tmp`
+    ///   directly, so two savers — two TUIs, or a TUI and `provision` — could
+    ///   interleave into one temp and rename half a document into place. Every
+    ///   other writer in this crate goes through `atomic::write`, whose header
+    ///   documents this exact hazard; this one simply never did.
+    /// - **Never overwrite content it could not read.** A config that failed to
+    ///   parse is still the user's config; the in-memory default standing in for
+    ///   it is not a value worth persisting over it.
     pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if self.unreadable {
+            return Err(std::io::Error::other(format!(
+                "{} exists but could not be parsed; refusing to overwrite it with defaults. \
+                 Fix or move the file, then try again.",
+                path.display()
+            )));
+        }
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let b = serde_json::to_vec_pretty(self)?;
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, b)?;
-        fs::rename(&tmp, path)
+        crate::atomic::write(path, &serde_json::to_vec_pretty(self)?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A config that exists and does not parse must survive the session that
+    /// could not read it. The sequence this pins: typo → load stands in with the
+    /// default → any persist (a border drag does one) → the file is defaults and
+    /// the user's layout is gone with nothing said.
+    #[test]
+    fn an_unreadable_config_is_never_overwritten_by_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config-v2.json");
+        let original = b"{ \"theme\": {}, oops }";
+        fs::write(&p, original).unwrap();
+
+        let cfg = Config::load_from(p.clone());
+        assert!(cfg.unreadable, "the file was there; standing in is not the same as absent");
+        let err = cfg.save_to(&p).expect_err("saving the stand-in over the real file must fail");
+        assert!(err.to_string().contains("refusing to overwrite"), "{err}");
+        assert_eq!(fs::read(&p).unwrap(), original, "not one byte of the user's file may change");
+    }
+
+    /// The flag is about THIS load, not about content: it must never round-trip
+    /// into the file (or a saved config would come back refusing to save).
+    #[test]
+    fn the_unreadable_flag_is_not_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config-v2.json");
+        Config::default().save_to(&p).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("unreadable"), "{text}");
+        assert!(!Config::load_from(p).unreadable);
+    }
+
+    /// A missing file is the first-run case: the default IS the truth and saving
+    /// it is what provisioning does.
+    #[test]
+    fn a_missing_config_saves_the_default_fine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("nested").join("config-v2.json");
+        let cfg = Config::load_from(p.clone());
+        assert!(!cfg.unreadable);
+        cfg.save_to(&p).unwrap();
+        assert!(Config::load_from(p).tabs.is_empty());
+    }
+
+    /// The write goes through `atomic::write`, so it never touches the fixed
+    /// `config-v2.json.tmp` that two concurrent savers used to share — which is
+    /// how half a document got renamed into place.
+    ///
+    /// Occupying that name with a directory is the cheap way to say "nobody may
+    /// use this path": the old code wrote to it and failed, `atomic::write`
+    /// never looks at it. Asserting only that no temp SURVIVES would prove
+    /// nothing, because the rename removed the shared temp too.
+    #[test]
+    fn saving_does_not_go_through_the_shared_temp_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config-v2.json");
+        let squatted = tmp.path().join("config-v2.json.tmp");
+        fs::create_dir(&squatted).unwrap();
+
+        Config::default().save_to(&p).expect("a busy fixed temp name must not fail the save");
+        assert!(squatted.is_dir(), "the shared temp name was written to");
+
+        let left: Vec<String> = fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "config-v2.json" && n != "config-v2.json.tmp")
+            .collect();
+        assert!(left.is_empty(), "temps must not survive: {left:?}");
+    }
 
     /// Segments are hand-written config, so both the file's own snake_case and
     /// the camelCase people arrive with from Claude's settings must work — and a

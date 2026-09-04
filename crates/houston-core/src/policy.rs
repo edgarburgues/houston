@@ -125,10 +125,7 @@ pub fn summarize(v: Option<&Value>) -> String {
 const CELL: usize = 22;
 
 fn clip(s: &str) -> String {
-    if s.chars().count() <= CELL {
-        return s.to_string();
-    }
-    format!("{}…", s.chars().take(CELL - 1).collect::<String>())
+    crate::text::clip(s, CELL)
 }
 
 /// Whether every account agrees about a key.

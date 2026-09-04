@@ -673,10 +673,15 @@ impl App {
         let Some(d) = &self.drag else { return };
         let total = d.base_a + d.base_b;
         let delta = cursor as i32 - d.start as i32;
-        let mut a = (d.base_a as i32 + delta).clamp(MIN_PANE as i32, total as i32 - MIN_PANE as i32);
+        // The guard comes FIRST, and that order is the whole point: `Ord::clamp`
+        // panics unless `min <= max`, so with `total < 2 * MIN_PANE` the clamp
+        // below aborts the TUI before this branch could have skipped it. With
+        // MIN_PANE = 4 that is a 9-row terminal, or any layout holding a
+        // `Fixed(1..3)` pane.
         if total < 2 * MIN_PANE {
-            a = d.base_a as i32; // too small to split meaningfully
+            return; // too small to split meaningfully: leave the sizes alone
         }
+        let a = (d.base_a as i32 + delta).clamp(MIN_PANE as i32, total as i32 - MIN_PANE as i32);
         let b = total as i32 - a;
         let (path, idx) = (d.path.clone(), d.idx);
         if let Some(children) = split_children_mut(&mut self.root, &path) {
@@ -947,6 +952,38 @@ fn normal_key(app: &mut App, k: KeyEvent) -> bool {
     // The status line is transient: the next keystroke clears it, and whatever
     // this key does may set a fresh one.
     app.world.status.clear();
+
+    // A pane taking typed input owns the keyboard, and this branch has to come
+    // before every global rather than guarding three of them.
+    //
+    // What it replaces: only Enter/Esc/Backspace were guarded by
+    // `focused_is_editing()`, so every CHARACTER global still fired mid-edit.
+    // Typing a value containing `q` quit Houston and threw the edit away; `o`
+    // opened the options overlay on top of it; `:` the palette, `L` a live
+    // query, a digit or `[`/`]` a tab switch. The ↑/↓ remap was its own version
+    // of the same bug — it delivered 'k'/'j' to the widget, i.e. typed those
+    // letters into the value.
+    if app.focused_is_editing() {
+        match k.code {
+            // The one global that survives: Ctrl-C is the terminal's own escape
+            // hatch, and a user pressing it wants out, not a literal 'c'.
+            KeyCode::Char('c') if ctrl => return true,
+            KeyCode::Enter => app.edit_key(EditKey::Commit),
+            KeyCode::Esc => app.edit_key(EditKey::Cancel),
+            KeyCode::Backspace => app.edit_key(EditKey::Backspace),
+            // No ctrl-combo types text either: Ctrl-P used to open the palette
+            // and must not become a 'p' in the value.
+            KeyCode::Char(_) if ctrl => {}
+            KeyCode::Char(c) => route_key(app, c),
+            // Everything else — arrows, Tab, function keys — is dropped rather
+            // than remapped. `on_key` carries only characters, so there is no
+            // honest way to forward an arrow, and inventing one is what put
+            // 'k'/'j' into people's values.
+            _ => {}
+        }
+        return false;
+    }
+
     match k.code {
         KeyCode::Char('c') if ctrl => return true,
         KeyCode::Char('q') => return true,
@@ -960,15 +997,10 @@ fn normal_key(app: &mut App, k: KeyEvent) -> bool {
         KeyCode::BackTab => app.focus_prev(),
         KeyCode::Up => route_key(app, 'k'),
         KeyCode::Down => route_key(app, 'j'),
-        // Enter is context-aware, and a pane that is taking typed input comes
-        // FIRST: resuming a chat because somebody pressed Enter to save a value
-        // would be a genuinely surprising thing to do.
-        KeyCode::Enter if app.focused_is_editing() => app.edit_key(EditKey::Commit),
-        KeyCode::Esc if app.focused_is_editing() => app.edit_key(EditKey::Cancel),
-        KeyCode::Backspace if app.focused_is_editing() => app.edit_key(EditKey::Backspace),
         // Enter, in order of who has the strongest claim: a pane taking typed
-        // input, then a pane that says Enter means something there, and only then
-        // the default — which stays a one-keystroke resume.
+        // input (handled above, before any global), then a pane that says Enter
+        // means something there, and only then the default — which stays a
+        // one-keystroke resume.
         KeyCode::Enter => {
             if !app.offer_enter() {
                 if app.focused_widget_id().as_deref() == Some("basics:accounts") {
@@ -1263,16 +1295,20 @@ fn handle_mouse(
                         .unwrap_or(false);
                     app.last_click = Some((now, i, m.row));
                     if dbl && wid == "missions" {
-                        if let Some(mi) = app.world.selected() {
-                            let meta = app.world.meta_of(mi);
-                            let cwd =
-                                if meta.cwd_override.is_empty() { mi.cwd.clone() } else { meta.cwd_override.clone() };
-                            let id = mi.id.clone();
-                            let path = mi.path.clone();
-                            let prefs = meta.launch.clone();
-                            app.last_click = None; // don't treat a 3rd click as another double
-                            return Some(Action::Resume { id, cwd, path, prefs });
-                        }
+                        app.last_click = None; // don't treat a 3rd click as another double
+                        // Through `begin_resume`, never by rebuilding the action:
+                        // that is the ONLY place that consults `live_of` and
+                        // raises the "already open" prompt, and this path used to
+                        // assemble an `Action::Resume` by hand — a second claude
+                        // on one JSONL. The event loop's `conflict.is_none()`
+                        // guard does not help, because it only blocks the mouse
+                        // once a prompt is already up; the first double click is
+                        // exactly the one that gets through.
+                        //
+                        // It queues into `app.pending` itself, so there is no
+                        // action to return.
+                        app.begin_resume();
+                        return None;
                     }
                     if dbl && wid == "basics:accounts" {
                         if let Some(a) = app.world.selected_account() {
@@ -1710,6 +1746,11 @@ mod tests {
             d
         });
         unsafe { std::env::set_var("HOUSTON_HOME", dir) };
+        // And keep `claude_settings` from discovering the real `~/.claude` as a
+        // fold participant. Its own `cfg!(test)` guard does NOT cover this
+        // crate — see `default_scope_allowed` — and a retention test walked
+        // through it and deleted a value from the developer's config dir.
+        unsafe { std::env::set_var("HOUSTON_DEFAULT_SCOPE", "0") };
     }
 
     fn test_app() -> App {
@@ -2048,6 +2089,178 @@ mod tests {
         let layout = build::to_layout(&app.root);
         let json = serde_json::to_string(&layout).unwrap();
         assert!(json.contains("\"size\":\"26\""));
+    }
+
+    /// `Ord::clamp` panics unless `min <= max`, and the guard for "too small to
+    /// split" used to be evaluated one line AFTER the clamp — so the case it
+    /// existed for aborted the whole TUI instead. With MIN_PANE = 4 a 9-row
+    /// terminal reaches it, as does any layout holding a `Fixed(1..3)` pane.
+    ///
+    /// The existing drag test uses a 100x30 terminal, which is why this never
+    /// showed up.
+    #[test]
+    fn a_drag_in_a_pane_too_small_to_split_does_nothing_instead_of_panicking() {
+        let mut app = test_app();
+        let shape = |a: &App| serde_json::to_string(&build::to_layout(&a.root)).unwrap();
+        let before = shape(&app);
+        // base_a + base_b = 3, well under 2 * MIN_PANE. The old code computed
+        // clamp(4, -1) here.
+        app.drag = Some(Drag { path: Vec::new(), idx: 0, dir: Direction::Horizontal, start: 2, base_a: 2, base_b: 1 });
+        app.apply_drag(7);
+        assert_eq!(shape(&app), before, "a drag that cannot move anything must not resize");
+        assert!(!app.dirty, "and must not dirty the config either");
+
+        // Exactly at the threshold the clamp is legal again and the drag applies.
+        app.drag = Some(Drag {
+            path: Vec::new(),
+            idx: 0,
+            dir: Direction::Horizontal,
+            start: MIN_PANE,
+            base_a: MIN_PANE,
+            base_b: MIN_PANE,
+        });
+        app.apply_drag(MIN_PANE + 10); // clamped to the far end
+        if let Node::Split { children, .. } = &app.root {
+            assert_eq!(children[0].0, Size::Fixed(MIN_PANE), "clamped to leave the neighbor its minimum");
+            assert_eq!(children[1].0, Size::Fixed(MIN_PANE));
+        } else {
+            panic!("test_app root should be a split");
+        }
+    }
+
+    /// What a pane taking typed input received, so a test can look at it after
+    /// the widget has been moved into the tree.
+    #[derive(Default)]
+    struct EditLog {
+        typed: String,
+        commits: usize,
+        cancels: usize,
+        backspaces: usize,
+    }
+
+    /// A pane that is always editing. Only exists to prove the routing.
+    struct EverEditing(std::rc::Rc<std::cell::RefCell<EditLog>>);
+
+    impl Widget for EverEditing {
+        fn id(&self) -> &str {
+            "ever-editing"
+        }
+        fn title(&self, _w: &World) -> String {
+            "editing".into()
+        }
+        fn render(&self, _a: Rect, _f: &mut Frame, _w: &World, _focused: bool) {}
+        fn on_key(&mut self, key: char, _w: &mut World) -> bool {
+            self.0.borrow_mut().typed.push(key);
+            true
+        }
+        fn on_click(&mut self, _r: u16, _c: u16, _w: &mut World) {}
+        fn on_scroll(&mut self, _up: bool, _w: &mut World) {}
+        fn editing(&self) -> bool {
+            true
+        }
+        fn on_edit_commit(&mut self, _w: &mut World) {
+            self.0.borrow_mut().commits += 1;
+        }
+        fn on_edit_cancel(&mut self) {
+            self.0.borrow_mut().cancels += 1;
+        }
+        fn on_edit_backspace(&mut self) {
+            self.0.borrow_mut().backspaces += 1;
+        }
+    }
+
+    /// While a pane is taking typed input, NO character global may fire. Only
+    /// Enter/Esc/Backspace were guarded before, so typing a value containing
+    /// `q` quit Houston and discarded the edit.
+    #[test]
+    fn no_character_global_fires_while_a_pane_is_editing() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let log = std::rc::Rc::new(std::cell::RefCell::new(EditLog::default()));
+        let mut app = app_with(Config::basics()); // >1 view, so digits/brackets are live globals
+        app.root = Node::Pane(Box::new(EverEditing(std::rc::Rc::clone(&log))));
+        app.focused = 0;
+        let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+
+        let globals = ['q', 'o', ':', 'L', 'A', '0', '1', '[', ']', '?', 'x'];
+        for c in globals {
+            assert!(!normal_key(&mut app, key(c)), "'{c}' quit Houston mid-edit");
+        }
+        assert!(!app.help, "'?' opened the help overlay mid-edit");
+        assert!(!app.pal, "':' opened the palette mid-edit");
+        assert!(app.opts.is_none(), "'o' opened the options overlay mid-edit");
+        assert!(app.pending.is_none(), "a keystroke started a session mid-edit");
+        assert!(!app.world.live_wanted, "'L' fired a live query mid-edit");
+        assert_eq!(app.active, 0, "a digit or bracket switched tab mid-edit");
+        // Every one of them is text instead.
+        assert_eq!(log.borrow().typed, globals.iter().collect::<String>());
+
+        // Arrows are dropped, not remapped: ↑/↓ used to arrive as 'k'/'j' and
+        // type those letters into the value.
+        log.borrow_mut().typed.clear();
+        normal_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        normal_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(log.borrow().typed, "", "an arrow was remapped into the value");
+
+        // Nor does a ctrl-combo type its letter — Ctrl-P opens the palette
+        // normally, and must do nothing here rather than insert a 'p'.
+        normal_key(&mut app, KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(log.borrow().typed, "");
+        assert!(!app.pal);
+
+        // The three edit keys still reach the pane…
+        normal_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        normal_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        normal_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let l = log.borrow();
+        assert_eq!((l.backspaces, l.cancels, l.commits), (1, 1, 1));
+        drop(l);
+
+        // …and Ctrl-C still quits, because that is the terminal's own escape.
+        assert!(normal_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+    }
+
+    /// A double click has to go through `begin_resume`, which is the only place
+    /// that checks `live_of` and raises the "already open" prompt. It used to
+    /// assemble an `Action::Resume` by hand and start a second claude on the
+    /// same JSONL; the event loop's `conflict.is_none()` guard does not cover
+    /// it, because that only blocks the mouse once a prompt is already up.
+    #[test]
+    fn a_double_click_on_a_live_mission_asks_instead_of_resuming() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut app = demo_app(Config::default());
+        let full = Rect::new(0, 0, 90, 24);
+        let mut rects = Vec::new();
+        collect_rects(&app.root, body_area(full), &mut rects);
+
+        let mut ids = Vec::new();
+        widget_ids(&app.root, &mut ids);
+        let i = ids.iter().position(|id| id == "missions").expect("the default layout has a missions pane");
+        let r = inner(rects[i]);
+        let click = |row: u16| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: r.x + 1,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // First click selects; whatever it landed on is the mission under test.
+        assert!(handle_mouse(&mut app, click(r.y), full, &rects).is_none());
+        let id = app.world.selected().expect("a mission is selected").id.clone();
+        app.world.live = vec![live_session(&id)];
+
+        // Second click on the same row is the double click.
+        let action = handle_mouse(&mut app, click(r.y), full, &rects);
+        assert!(action.is_none(), "the double click must not hand back a resume of its own");
+        assert!(app.conflict.is_some(), "a live mission must raise the prompt, not launch");
+        assert!(app.pending.is_none(), "nothing may be queued while the prompt is up");
+
+        // And with nothing live, the same two clicks still resume — the guard
+        // must not have cost the feature.
+        let mut app = demo_app(Config::default());
+        assert!(handle_mouse(&mut app, click(r.y), full, &rects).is_none());
+        assert!(handle_mouse(&mut app, click(r.y), full, &rects).is_none());
+        assert!(app.conflict.is_none());
+        assert!(matches!(app.pending, Some(Action::Resume { .. })), "a double click on an idle mission resumes");
     }
 
     #[test]

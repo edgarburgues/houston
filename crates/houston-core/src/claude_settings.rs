@@ -244,12 +244,7 @@ fn scope_label(a: &Account) -> String {
 /// `projects/` — then it governs nothing the history count includes, and adding it
 /// would report a limit over an empty set.
 fn default_config_scope() -> Option<Account> {
-    // Never under test. This is the only function here that reaches a path nobody
-    // passed in, and it reached the real `~/.claude/settings.json` from a unit test
-    // the first time it existed — the fixtures said 3650 days and the write landed
-    // on this machine. The `_of` entry points exist so a test states its
-    // participants; this makes forgetting harmless instead of expensive.
-    if cfg!(test) {
+    if !default_scope_allowed() {
         return None;
     }
     let dir = crate::paths::home().join(".claude");
@@ -258,6 +253,42 @@ fn default_config_scope() -> Option<Account> {
         config_dir: dir.to_string_lossy().into_owned(),
         ..Default::default()
     })
+}
+
+/// Whether the ambient `~/.claude` participant may be discovered at all.
+///
+/// `default_config_scope` is the only function here that reaches a path nobody
+/// passed in, and it has now written to the real `~/.claude/settings.json` from
+/// a test **twice**. The first time a houston-core unit test did it: the
+/// fixtures said 3650 days and the write landed on this machine, which is why
+/// the `_of` entry points exist and why a `cfg!(test)` guard was added.
+///
+/// The second time is why this function exists. `cfg!(test)` is evaluated when
+/// **this crate** is compiled, so it is false for every OTHER crate's tests —
+/// they link houston-core as an ordinary dependency. A houston-tui test that
+/// pressed the retention row therefore went straight through the guard and
+/// deleted a `cleanupPeriodDays` somebody had set with
+/// `houston retention --keep 1000`.
+///
+/// So the guard is a RUNTIME one that any crate's harness can set, and
+/// houston-tui's test setup sets it next to `HOUSTON_HOME` — the same place
+/// that already makes forgetting harmless there.
+///
+/// Failing closed is cheap: skipping the participant under-reports one config
+/// dir, while including it wrongly edits a file the caller never named.
+fn default_scope_allowed() -> bool {
+    !cfg!(test) && scope_env_allows(std::env::var("HOUSTON_DEFAULT_SCOPE").ok().as_deref())
+}
+
+/// The `$HOUSTON_DEFAULT_SCOPE` half of the guard, kept pure so it can be
+/// tested. The `cfg!(test)` half cannot be: inside this crate's tests it is
+/// false by construction, which is precisely the property that made it useless
+/// for every other crate.
+fn scope_env_allows(v: Option<&str>) -> bool {
+    match v {
+        Some(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "off" | "no" | "false"),
+        None => true,
+    }
 }
 
 impl Retention {
@@ -819,6 +850,20 @@ mod tests {
         let bad = set_cleanup_period_of(&refs(&accs), Some(0));
         assert!(bad.iter().all(|(_, r)| r.is_err()), "{bad:?}");
         assert_eq!(cleanup_period_days(&accs[0]), None, "nothing was written");
+    }
+
+    /// The runtime half of the guard that keeps `default_config_scope` off the
+    /// real `~/.claude` in OTHER crates' tests. Unset must stay permissive:
+    /// this is a test-harness knob, not a feature, and a machine that never
+    /// sets it has to keep folding its default config dir.
+    #[test]
+    fn the_default_scope_env_guard_reads_the_obvious_spellings() {
+        assert!(scope_env_allows(None), "unset must not disable the fold");
+        assert!(scope_env_allows(Some("1")));
+        assert!(scope_env_allows(Some("")), "empty reads as unset, not as a refusal");
+        for off in ["0", "off", "no", "false", " OFF ", "False"] {
+            assert!(!scope_env_allows(Some(off)), "{off:?} should turn it off");
+        }
     }
 
     #[test]
