@@ -90,7 +90,7 @@ pub fn scan_root(root: &Path, cache: Option<&mut Cache>) -> Vec<Mission> {
             }
         }
     });
-    missions.sort_by(|a, b| b.last_time.cmp(&a.last_time));
+    missions.sort_by_key(|a| std::cmp::Reverse(a.last_time));
     missions
 }
 
@@ -132,7 +132,7 @@ pub fn scan_all() -> Vec<Mission> {
         }
     }
     cache.save();
-    all.sort_by(|a, b| b.last_time.cmp(&a.last_time));
+    all.sort_by_key(|a| std::cmp::Reverse(a.last_time));
     all
 }
 
