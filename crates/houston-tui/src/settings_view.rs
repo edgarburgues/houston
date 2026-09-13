@@ -521,7 +521,8 @@ impl Widget for SettingsWidget {
                 _ => None,
             })
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0).min((area.width as usize).saturating_sub(6) / 3);
+        let value_w = (area.width as usize).saturating_sub(lw + 5);
 
         // The last two lines are reserved: what the last action did, and the keys.
         let reserved = if self.said.is_empty() { 1 } else { 2 };
@@ -536,16 +537,17 @@ impl Widget for SettingsWidget {
                 Row::Setting { entry, shown, mixed } => {
                     let editing = selected && self.editing.is_some();
                     let value = if editing {
-                        format!("{}▌", self.editing.clone().unwrap_or_default())
+                        houston_core::text::edit_line(self.editing.as_deref().unwrap_or_default(), value_w)
                     } else if *mixed {
                         format!("{shown} (differs)")
                     } else {
                         shown.clone()
                     };
-                    let pad = " ".repeat(lw.saturating_sub(entry.label.chars().count()));
+                    let label = houston_core::text::clip(entry.label, lw);
+                    let pad = " ".repeat(lw.saturating_sub(houston_core::text::width(&label)));
                     let mut spans = vec![
                         Span::styled(if selected { " › " } else { "   " }.to_string(), Style::new().fg(p.accent)),
-                        Span::styled(entry.label.to_string(), Style::new().fg(p.fg)),
+                        Span::styled(label, Style::new().fg(p.fg)),
                         Span::raw(format!("{pad}  ")),
                         Span::styled(
                             value,
@@ -569,7 +571,8 @@ impl Widget for SettingsWidget {
                     lines.push(Line::from(spans));
                 }
                 Row::Fact { label, value, note, warn } => {
-                    let pad = " ".repeat(lw.saturating_sub(label.chars().count()));
+                    let label = houston_core::text::clip(label, lw);
+                    let pad = " ".repeat(lw.saturating_sub(houston_core::text::width(&label)));
                     let mut spans = vec![
                         Span::styled(if selected { " › " } else { "   " }.to_string(), Style::new().fg(p.accent)),
                         Span::styled(label.clone(), Style::new().fg(p.grey)),

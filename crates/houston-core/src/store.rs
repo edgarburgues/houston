@@ -42,7 +42,7 @@ impl Store {
     /// tests can use a temp dir instead of the real ~/.claude/houston.
     pub fn load_from(dir: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(dir.join("programs"))?;
-        let meta = Self::read_meta_from_disk(&dir.join("store.json"));
+        let meta = Self::read_meta_from_disk(&dir.join("store.json"))?;
         let mut programs = Vec::new();
         if let Ok(entries) = fs::read_dir(dir.join("programs")) {
             for e in entries.flatten() {
@@ -69,18 +69,17 @@ impl Store {
     }
 
     /// Read the meta map straight from disk, ignoring our in-memory copy.
-    fn read_meta_from_disk(path: &Path) -> HashMap<String, Meta> {
-        fs::read(path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<OnDisk>(&b).ok())
-            .map(|d| d.meta)
-            .unwrap_or_default()
-    }
-
-    fn save_program(&self, p: &Program) -> io::Result<()> {
-        let path = prog_file(&self.dir, &p.name);
-        let _lk = lock_for(&path)?;
-        write_atomic(&path, serde_json::to_vec_pretty(p)?.as_slice())
+    fn read_meta_from_disk(path: &Path) -> io::Result<HashMap<String, Meta>> {
+        match fs::read(path) {
+            Ok(bytes) => {
+                let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+                serde_json::from_slice::<OnDisk>(bytes)
+                    .map(|d| d.meta)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(HashMap::new()),
+            Err(e) => Err(e),
+        }
     }
 
     // --- meta mutations ---
@@ -103,7 +102,7 @@ impl Store {
     fn mutate_meta(&mut self, key: &str, f: impl FnOnce(&mut Meta)) -> io::Result<()> {
         let path = self.meta_path();
         let _lk = lock_for(&path)?;
-        let mut fresh = Self::read_meta_from_disk(&path);
+        let mut fresh = Self::read_meta_from_disk(&path)?;
 
         let mut m = fresh.get(key).cloned().unwrap_or_default();
         f(&mut m);
@@ -189,17 +188,12 @@ impl Store {
         self.programs.iter().find(|p| prog_key(&p.name) == key)
     }
 
-    /// `program_by_name`'s identity rule, for the mutating paths.
-    fn program_mut(&mut self, name: &str) -> Option<&mut Program> {
-        let i = self
-            .programs
-            .iter()
-            .position(|p| p.name == name)
-            .or_else(|| {
-                let key = prog_key(name);
-                self.programs.iter().position(|p| prog_key(&p.name) == key)
-            })?;
-        self.programs.get_mut(i)
+    /// Publish the snapshot only after its write succeeds.
+    fn remember_program(&mut self, p: Program) {
+        let key = prog_key(&p.name);
+        self.programs.retain(|old| prog_key(&old.name) != key);
+        self.programs.push(p);
+        self.programs.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
     pub fn create_program(&mut self, name: &str, desc: &str) -> io::Result<()> {
@@ -207,36 +201,57 @@ impl Store {
         if name.is_empty() || self.program_by_name(name).is_some() {
             return Ok(());
         }
+        // Serialize creation across spellings that map to one program, even on
+        // case-sensitive filesystems and when this window has a stale list.
+        let _registry = lock_for(&self.dir.join("programs").join("registry"))?;
+        let key = prog_key(name);
+        let existing_path = fs::read_dir(self.dir.join("programs"))?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "prog")
+                && p.file_stem().is_some_and(|n| n.to_string_lossy().to_lowercase() == key));
+        let path = existing_path.unwrap_or_else(|| prog_file(&self.dir, name));
+        let _lk = lock_for(&path)?;
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let existing = serde_json::from_slice(&bytes)?;
+                self.remember_program(existing);
+                return Ok(());
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
         let p = Program {
             name: name.to_string(),
             description: desc.to_string(),
             missions: Vec::new(),
         };
-        self.save_program(&p)?;
-        self.programs.push(p);
-        self.programs.sort_by(|a, b| a.name.cmp(&b.name));
+        write_atomic(&path, &serde_json::to_vec_pretty(&p)?)?;
+        self.remember_program(p);
         Ok(())
     }
 
     pub fn add_to_program(&mut self, name: &str, mission_key: &str) -> io::Result<()> {
-        let Some(p) = self.program_mut(name) else {
-            return Ok(());
-        };
-        if p.missions.iter().any(|k| k == mission_key) {
-            return Ok(());
-        }
-        p.missions.push(mission_key.to_string());
-        let snapshot = p.clone();
-        self.save_program(&snapshot)
+        self.mutate_program(name, |p| {
+            if !p.missions.iter().any(|k| k == mission_key) {
+                p.missions.push(mission_key.to_string());
+            }
+        })
     }
 
     pub fn remove_from_program(&mut self, name: &str, mission_key: &str) -> io::Result<()> {
-        let Some(p) = self.program_mut(name) else {
-            return Ok(());
-        };
-        p.missions.retain(|k| k != mission_key);
-        let snapshot = p.clone();
-        self.save_program(&snapshot)
+        self.mutate_program(name, |p| p.missions.retain(|k| k != mission_key))
+    }
+
+    fn mutate_program(&mut self, name: &str, f: impl FnOnce(&mut Program)) -> io::Result<()> {
+        let Some(known) = self.program_by_name(name) else { return Ok(()) };
+        let path = prog_file(&self.dir, &known.name);
+        let _lk = lock_for(&path)?;
+        let mut fresh: Program = serde_json::from_slice(&fs::read(&path)?)?;
+        f(&mut fresh);
+        write_atomic(&path, &serde_json::to_vec_pretty(&fresh)?)?;
+        self.remember_program(fresh);
+        Ok(())
     }
 }
 
@@ -300,6 +315,39 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let s = Store::load_from(tmp.path().to_path_buf()).unwrap();
         (tmp, s)
+    }
+
+    #[test]
+    fn unreadable_metadata_is_never_replaced_by_an_edit() {
+        let (tmp, mut s) = temp_store();
+        let p = tmp.path().join("store.json");
+        let broken = b"{invalid metadata";
+        fs::write(&p, broken).unwrap();
+        assert!(s.toggle_pin("p/one").is_err());
+        assert_eq!(fs::read(&p).unwrap(), broken);
+        assert!(Store::load_from(tmp.path().to_path_buf()).is_err());
+        fs::remove_file(&p).unwrap();
+        fs::create_dir(&p).unwrap();
+        assert!(s.toggle_pin("p/one").is_err());
+    }
+
+    #[test]
+    fn stale_program_snapshots_preserve_other_windows_edits() {
+        let (tmp, mut a) = temp_store();
+        let mut b = Store::load_from(tmp.path().to_path_buf()).unwrap();
+        a.create_program("Work", "original").unwrap();
+        a.add_to_program("work", "p/one").unwrap();
+        b.create_program("work", "must not replace").unwrap();
+        assert_eq!(b.program_by_name("work").unwrap().description, "original");
+        b.add_to_program("work", "p/two").unwrap();
+        a.remove_from_program("work", "p/one").unwrap();
+        let fresh = Store::load_from(tmp.path().to_path_buf()).unwrap();
+        assert_eq!(fresh.program_by_name("work").unwrap().missions, vec!["p/two"]);
+        let path = prog_file(tmp.path(), "Work");
+        fs::write(&path, b"broken").unwrap();
+        assert!(b.add_to_program("work", "p/three").is_err());
+        assert_eq!(fs::read(path).unwrap(), b"broken");
+        assert!(!b.program_by_name("work").unwrap().missions.contains(&"p/three".into()));
     }
 
     #[test]

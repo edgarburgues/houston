@@ -57,6 +57,8 @@ pub trait Widget {
     fn on_click(&mut self, row: u16, col: u16, world: &mut World);
     fn on_scroll(&mut self, up: bool, world: &mut World);
     fn post_render(&mut self, _area: Rect, _world: &World, _focused: bool) {}
+    /// Collect a background widget's message on the UI thread.
+    fn take_status(&mut self) -> Option<String> { None }
     /// The commands this widget advertises to the `?` overlay and the `:`
     /// palette while it is focused. Default: none.
     fn commands(&self) -> Vec<crate::command::Command> {
@@ -186,17 +188,72 @@ fn widget_ids(node: &Node, out: &mut Vec<String>) {
 /// Header (1) above, footer (1) below — the one geometry the renderer and the
 /// hit-testing share.
 fn body_area(area: Rect) -> Rect {
-    Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(2))
+    Rect::new(area.x, area.y.saturating_add(1.min(area.height)), area.width, area.height.saturating_sub(2))
 }
 
-fn pane_at(root: &Node, area: Rect, x: u16, y: u16) -> Option<usize> {
+/// Keep saved splits when every pane has usable content. Otherwise show a
+/// contextual pair (side by side or stacked), then just the focused pane.
+fn minimum_pane(id: &str) -> (u16, u16) {
+    match id {
+        "filters" => (18, 6),
+        "basics:quota" => (20, 5),
+        "basics:git" => (24, 3),
+        "settings" => (40, 10),
+        _ => (32, 10),
+    }
+}
+
+fn compact(app: &App, full: Rect) -> bool {
+    if app.maximized { return true; }
+    let mut ids = Vec::new();
+    widget_ids(&app.root, &mut ids);
     let mut rects = Vec::new();
-    collect_rects(root, body_area(area), &mut rects);
-    rects.iter().position(|r| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height)
+    collect_rects(&app.root, body_area(full), &mut rects);
+    rects.iter().zip(ids).any(|(r, id)| {
+        let (w, h) = minimum_pane(&id);
+        r.width < w || r.height < h
+    })
+}
+
+fn view_rects(app: &App, full: Rect) -> Vec<Rect> {
+    let body = body_area(full);
+    let mut rects = Vec::new();
+    collect_rects(&app.root, body, &mut rects);
+    if !compact(app, full) { return rects; }
+    rects.fill(Rect::default());
+    let mut ids = Vec::new();
+    widget_ids(&app.root, &mut ids);
+    let Some(focused_id) = ids.get(app.focused) else { return rects };
+    rects[app.focused] = body;
+    if app.maximized { return rects; }
+    let preferred = if focused_id == "missions" { "preview" } else { "missions" };
+    let partner = ids.iter().position(|id| id == preferred)
+        .or_else(|| (0..ids.len()).find(|i| *i != app.focused));
+    if let Some(partner) = partner.filter(|i| *i != app.focused) {
+        let (fw, fh) = minimum_pane(focused_id);
+        let (pw, ph) = minimum_pane(&ids[partner]);
+        let direction = if body.width / 2 >= fw.max(pw) && body.height >= fh.max(ph) {
+            Some(Direction::Horizontal)
+        } else if body.height / 2 >= fh.max(ph) && body.width >= fw.max(pw) {
+            Some(Direction::Vertical)
+        } else { None };
+        if let Some(direction) = direction {
+            let areas = Layout::new(direction, [Constraint::Percentage(50), Constraint::Percentage(50)]).split(body);
+            let mut pair = [app.focused, partner];
+            pair.sort_unstable();
+            rects[pair[0]] = areas[0];
+            rects[pair[1]] = areas[1];
+        }
+    }
+    rects
+}
+
+fn pane_at(rects: &[Rect], x: u16, y: u16) -> Option<usize> {
+    rects.iter().position(|r| r.contains(ratatui::layout::Position::new(x, y)))
 }
 
 fn inner(r: Rect) -> Rect {
-    Rect::new(r.x + 1, r.y + 1, r.width.saturating_sub(2), r.height.saturating_sub(2))
+    Block::bordered().padding(Padding::horizontal(1)).inner(r)
 }
 
 // --- resize: split boundaries ------------------------------------------------
@@ -287,6 +344,7 @@ pub struct App {
     pub cfg: Config,
     drag: Option<Drag>,
     dirty: bool,
+    maximized: bool,
     // Native discovery shell (core, plugin-independent).
     help: bool,
     help_scroll: u16,
@@ -427,6 +485,7 @@ impl App {
             cfg,
             drag: None,
             dirty: false,
+            maximized: false,
             help: false,
             help_scroll: 0,
             pal: false,
@@ -641,6 +700,8 @@ impl App {
     /// plus the focused widget's own commands. Feeds `?` and `:`.
     pub fn registry(&self) -> Vec<command::Command> {
         let mut reg = command::global_commands();
+        reg.push(command::Command::core(&["f10"], "F10",
+            if self.maximized { "restore panel layout" } else { "maximize focused panel" }, "Navigate", true));
         if self.tabs.len() > 1 {
             reg.push(command::Command::core(&["]"], "]", "next tab", "Navigate", false));
             reg.push(command::Command::core(&["["], "[", "previous tab", "Navigate", false));
@@ -654,6 +715,12 @@ impl App {
             reg.extend(cmds);
         }
         reg
+    }
+
+    fn toggle_maximized(&mut self) {
+        self.maximized = !self.maximized;
+        self.drag = None;
+        self.last_click = None;
     }
 
     fn focus_next(&mut self) {
@@ -731,8 +798,10 @@ impl App {
                 })
                 .collect();
         }
-        let _ = self.cfg.save();
-        self.dirty = false;
+        match self.cfg.save() {
+            Ok(()) => self.dirty = false,
+            Err(e) => self.world.status = format!("could not save layout: {e}"),
+        }
     }
 }
 
@@ -851,14 +920,18 @@ fn event_loop(
         terminal.draw(|f| ui(f, app))?;
 
         let full = terminal.size().map(|s| Rect::new(0, 0, s.width, s.height))?;
-        let mut rects = Vec::new();
-        collect_rects(&app.root, body_area(full), &mut rects);
+        let rects = view_rects(app, full);
         {
             let focused = app.focused;
             let mut ws = Vec::new();
             widgets_mut(&mut app.root, &mut ws);
             for (i, (w, r)) in ws.iter_mut().zip(rects.iter()).enumerate() {
-                w.post_render(inner(*r), &app.world, i == focused);
+                if r.width > 0 && r.height > 0 {
+                    w.post_render(inner(*r), &app.world, i == focused);
+                }
+                if let Some(status) = w.take_status() {
+                    app.world.status = status;
+                }
             }
         }
 
@@ -888,6 +961,10 @@ fn event_loop(
                 if let Some(action) = handle_mouse(app, m, full, &rects) {
                     app.pending = Some(action);
                 }
+            }
+            Event::Resize(_, _) => {
+                app.drag = None;
+                app.last_click = None;
             }
             _ => {}
         }
@@ -963,6 +1040,10 @@ fn normal_key(app: &mut App, k: KeyEvent) -> bool {
     // query, a digit or `[`/`]` a tab switch. The ↑/↓ remap was its own version
     // of the same bug — it delivered 'k'/'j' to the widget, i.e. typed those
     // letters into the value.
+    if k.code == KeyCode::F(10) {
+        app.toggle_maximized();
+        return false;
+    }
     if app.focused_is_editing() {
         match k.code {
             // The one global that survives: Ctrl-C is the terminal's own escape
@@ -975,7 +1056,7 @@ fn normal_key(app: &mut App, k: KeyEvent) -> bool {
             // and must not become a 'p' in the value.
             KeyCode::Char(_) if ctrl => {}
             KeyCode::Char(c) => route_key(app, c),
-            // Everything else — arrows, Tab, function keys — is dropped rather
+            // Everything else — arrows, Tab, other function keys — is dropped rather
             // than remapped. `on_key` carries only characters, so there is no
             // honest way to forward an arrow, and inventing one is what put
             // 'k'/'j' into people's values.
@@ -1214,6 +1295,7 @@ fn run_command(app: &mut App, cmd: &command::Command) -> bool {
         }
         ":" | "ctrl+p" => open_palette(app),
         "enter" => app.begin_resume(),
+        "f10" => app.toggle_maximized(),
         "tab" => app.focus_next(),
         "shift+tab" => app.focus_prev(),
         "]" => app.next_tab(),
@@ -1265,7 +1347,9 @@ fn handle_mouse(
             // A boundary under the cursor starts a resize; otherwise focus +
             // forward the click to the pane's widget.
             let mut bounds = Vec::new();
-            collect_boundaries(&app.root, body_area(full), &mut Vec::new(), &mut bounds);
+            if !compact(app, full) {
+                collect_boundaries(&app.root, body_area(full), &mut Vec::new(), &mut bounds);
+            }
             if let Some(bi) = boundary_at(&bounds, m.column, m.row) {
                 let b = &bounds[bi];
                 let start = if b.dir == Direction::Horizontal { m.column } else { m.row };
@@ -1279,7 +1363,7 @@ fn handle_mouse(
                 });
                 return None;
             }
-            if let Some(i) = pane_at(&app.root, full, m.column, m.row) {
+            if let Some(i) = pane_at(rects, m.column, m.row) {
                 app.focused = i;
                 let r = inner(rects[i]);
                 if m.column >= r.x && m.row >= r.y && m.column < r.x + r.width && m.row < r.y + r.height {
@@ -1332,7 +1416,7 @@ fn handle_mouse(
             }
         }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-            if let Some(i) = pane_at(&app.root, full, m.column, m.row) {
+            if let Some(i) = pane_at(rects, m.column, m.row) {
                 let up = m.kind == MouseEventKind::ScrollUp;
                 let mut ws = Vec::new();
                 widgets_mut(&mut app.root, &mut ws);
@@ -1353,6 +1437,7 @@ fn route_key(app: &mut App, c: char) {
 }
 
 fn render_pane(w: &dyn Widget, area: Rect, frame: &mut Frame, world: &World, focused: bool) {
+    if area.width == 0 || area.height == 0 { return; }
     let color = if focused { world.palette.border_focus } else { world.palette.border };
     let mut bs = Style::new().fg(color);
     if focused {
@@ -1375,8 +1460,7 @@ fn ui(frame: &mut Frame, app: &App) {
 
     render_header(frame, header, app);
 
-    let mut rects = Vec::new();
-    collect_rects(&app.root, body, &mut rects);
+    let rects = view_rects(app, area);
     let mut i = 0;
     render_tree(&app.root, &rects, &mut i, frame, app);
 
@@ -1395,12 +1479,18 @@ fn ui(frame: &mut Frame, app: &App) {
     // A footer that never collapses: only hint-flagged commands, derived from
     // the registry. `?` and `:` carry the full discoverability. A transient
     // status (an export path, an error) takes the line while it's set.
-    let (text, style) = if app.world.status.is_empty() {
-        (command::footer_hint(&app.registry()), Style::new().fg(p.grey))
+    let (text, style) = if let Some(o) = &app.opts {
+        (if o.editing.is_some() { "Enter:save Esc:discard" } else { "j/k:field Enter:change e:edit Esc:close" }.into(), Style::new().fg(p.grey))
+    } else if app.world.status.is_empty() {
+        (if compact(app, area) {
+            format!("{}/{} Tab:panel F10:{} ?:help", app.focused + 1, app.panes, if app.maximized { "restore" } else { "max" })
+        } else { command::footer_hint(&app.registry()) }, Style::new().fg(p.grey))
     } else {
         (app.world.status.clone(), Style::new().fg(p.accent))
     };
-    frame.render_widget(Paragraph::new(Line::raw(text)).style(style), footer);
+    if area.height > 1 {
+        frame.render_widget(Paragraph::new(Line::raw(houston_core::text::clip(&text, footer.width as usize))).style(style), footer);
+    }
 }
 
 /// The header: a single title for one tab, or a tab bar (active tab bold, the
@@ -1421,11 +1511,18 @@ struct Chip {
 /// the tab next to the one you aimed at.
 fn header_layout(app: &App, width: u16) -> (Vec<Span<'static>>, Vec<Chip>) {
     let p = &app.world.palette;
+    let total: usize = app.tabs.iter().map(|t| houston_core::text::width(&t.name) + 5).sum();
+    if total + 24 > width as usize {
+        let label = houston_core::text::clip(&format!("Houston · {}", app.tabs[app.active].name), width as usize);
+        let cells = houston_core::text::width(&label) as u16;
+        return (vec![Span::styled(label, Style::new().fg(p.accent).add_modifier(Modifier::BOLD))],
+            vec![Chip { tab: app.active, col: 0, width: cells }]);
+    }
     let brand = " Houston ";
     let mut spans: Vec<Span<'static>> =
         vec![Span::styled(brand.to_string(), Style::new().fg(p.accent).add_modifier(Modifier::BOLD))];
     let mut chips = Vec::new();
-    let mut col = brand.chars().count() as u16;
+    let mut col = houston_core::text::width(brand) as u16;
 
     let chip_style = |active: bool| {
         if active {
@@ -1442,7 +1539,7 @@ fn header_layout(app: &App, width: u16) -> (Vec<Span<'static>>, Vec<Chip>) {
         // One view: keep the quiet single-tab form rather than a strip of one.
         if let Some((_, t)) = configured.first() {
             let label = format!("· {} ", t.name);
-            col += label.chars().count() as u16;
+            col += houston_core::text::width(&label) as u16;
             spans.push(Span::styled(label, Style::new().fg(p.grey)));
         }
     } else {
@@ -1452,7 +1549,7 @@ fn header_layout(app: &App, width: u16) -> (Vec<Span<'static>>, Vec<Chip>) {
                 col += 1;
             }
             let label = format!(" {} {} ", drawn + 1, t.name);
-            let w = label.chars().count() as u16;
+            let w = houston_core::text::width(&label) as u16;
             spans.push(Span::styled(label, chip_style(*i == app.active)));
             chips.push(Chip { tab: *i, col, width: w });
             col += w;
@@ -1465,13 +1562,13 @@ fn header_layout(app: &App, width: u16) -> (Vec<Span<'static>>, Vec<Chip>) {
     let settings = app.tabs.iter().position(|t| t.synthetic);
     let settings_label = settings.map(|_| format!(" 0 {SETTINGS_TAB} ")).unwrap_or_default();
     let info = format!("{} missions ", app.world.visible.len());
-    let right = (settings_label.chars().count() + info.chars().count()) as u16;
+    let right = (houston_core::text::width(&settings_label) + houston_core::text::width(&info)) as u16;
     if width > col + right {
         let gap = width - col - right;
         spans.push(Span::raw(" ".repeat(gap as usize)));
         col += gap;
         if let Some(i) = settings {
-            let w = settings_label.chars().count() as u16;
+            let w = houston_core::text::width(&settings_label) as u16;
             spans.push(Span::styled(settings_label, chip_style(i == app.active)));
             chips.push(Chip { tab: i, col, width: w });
         }
@@ -1622,8 +1719,11 @@ fn buffer_to_html(buf: &ratatui::buffer::Buffer) -> String {
             }
             run.clear();
         };
+        let mut skip = 0;
         for x in 0..area.width {
+            if skip > 0 { skip -= 1; continue; }
             let cell = &buf[(x, y)];
+            skip = houston_core::text::width(cell.symbol()).saturating_sub(1);
             let st = resolve(cell);
             if cur.as_ref() != Some(&st) {
                 flush(&mut out, &mut run, &cur);
@@ -1665,11 +1765,11 @@ fn demo_app(cfg: Config) -> App {
     let store = houston_core::store::Store::load_from(dir).unwrap();
     let mut app = App::from_config_with_plugins(cfg, store, &[]);
     let samples = [
-        ("lifeos-stack: deploy postgres+pgvector", true),
+        ("demo: deploy database", true),
         ("houston v2: native help + palette shell", false),
-        ("pokewalker-v2: rtc bridge firmware", false),
-        ("homelab-docs: router + wireguard notes", false),
-        ("notion life crm: sync module", false),
+        ("demo: device firmware", false),
+        ("demo: network notes", false),
+        ("demo: sync module", false),
     ];
     for (i, (title, pinned)) in samples.iter().enumerate() {
         let m = Mission {
@@ -1719,6 +1819,22 @@ pub fn demo_screens_html() -> String {
     e.next_tab();
     push("v2 — tab Focus", &mut e);
 
+    let mut narrow = demo_app(Config::basics());
+    narrow.begin_options();
+    if let Some(o) = narrow.opts.as_mut() {
+        o.row = 4;
+        o.editing = Some("a-very-long-worktree-name-END".into());
+    }
+    out.push_str("<figure><figcaption>Narrow edit 30 x 8</figcaption>");
+    out.push_str(&buffer_to_html(&render_snapshot(&mut narrow, 30, 8)));
+    out.push_str("</figure>");
+
+    for (w, h) in [(40, 12), (80, 24), (60, 60), (160, 40), (240, 30)] {
+        let mut app = demo_app(Config::basics());
+        out.push_str(&format!("<figure><figcaption>{w} × {h}</figcaption>"));
+        out.push_str(&buffer_to_html(&render_snapshot(&mut app, w, h)));
+        out.push_str("</figure>");
+    }
     out
 }
 
@@ -1751,6 +1867,16 @@ mod tests {
         // crate — see `default_scope_allowed` — and a retention test walked
         // through it and deleted a value from the developer's config dir.
         unsafe { std::env::set_var("HOUSTON_DEFAULT_SCOPE", "0") };
+    }
+
+    #[test]
+    fn failed_layout_save_keeps_the_change_pending_and_reports_it() {
+        let mut app = test_app();
+        app.cfg.unreadable = true;
+        app.dirty = true;
+        app.persist();
+        assert!(app.dirty);
+        assert!(app.world.status.contains("could not save layout"));
     }
 
     fn test_app() -> App {
@@ -2282,8 +2408,94 @@ mod tests {
     /// panic here leaves the terminal in raw mode, so a mangled shell is the
     /// user-visible cost. Cheap to assert, so assert it broadly.
     #[test]
+    fn compact_layout_follows_focus_and_restores_saved_splits() {
+        let mut app = demo_app(Config::basics());
+        let wide = Rect::new(0, 0, 160, 45);
+        let original = view_rects(&app, wide);
+        for size in [(30, 10), (40, 12), (240, 10)] {
+            let full = Rect::new(0, 0, size.0, size.1);
+            for focus in 0..app.panes {
+                app.focused = focus;
+                let rects = view_rects(&app, full);
+                assert_eq!(rects[focus], body_area(full));
+                assert_eq!(rects.iter().filter(|r| r.width > 0 && r.height > 0).count(), 1);
+                let content = inner(rects[focus]);
+                assert_eq!(pane_at(&rects, content.x, content.y), Some(focus));
+                render_snapshot(&mut app, size.0, size.1);
+            }
+        }
+        assert_eq!(view_rects(&app, wide), original);
+        assert!(app.drag.is_none());
+    }
+
+    #[test]
+    fn intermediate_views_pair_missions_and_preview_and_maximize_is_reversible() {
+        let mut app = demo_app(Config::basics());
+        let mut ids = Vec::new();
+        widget_ids(&app.root, &mut ids);
+        let mission = ids.iter().position(|id| id == "missions").unwrap();
+        let preview = ids.iter().position(|id| id == "preview").unwrap();
+        app.focused = mission;
+        let wide = view_rects(&app, Rect::new(0, 0, 160, 40));
+        assert_eq!(wide.iter().filter(|r| !r.is_empty()).count(), app.panes);
+        for (w, h, horizontal) in [(80, 24, true), (40, 40, false)] {
+            let full = Rect::new(0, 0, w, h);
+            let pair = view_rects(&app, full);
+            assert_eq!(pair.iter().filter(|r| !r.is_empty()).count(), 2);
+            assert_eq!(pair[mission].y == pair[preview].y, horizontal);
+            let area = inner(pair[preview]);
+            let click = ratatui::crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left), column: area.x, row: area.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            handle_mouse(&mut app, click, full, &pair);
+            assert_eq!(app.focused, preview);
+            assert!(app.drag.is_none());
+            assert_eq!(view_rects(&app, full), pair, "clicking the companion must not rearrange the pair");
+            normal_key(&mut app, KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE));
+            assert_eq!(view_rects(&app, full)[preview], body_area(full));
+            let restore = app.registry().into_iter().find(|c| c.keys == ["f10"]).unwrap();
+            assert!(restore.title.contains("restore"));
+            run_command(&mut app, &restore);
+            assert_eq!(view_rects(&app, full), pair);
+            app.focused = mission;
+        }
+        assert_eq!(view_rects(&app, Rect::new(0, 0, 160, 40)), wide);
+        assert!(!app.dirty, "view changes must not rewrite the saved layout");
+    }
+
+    #[test]
+    fn narrow_options_keep_the_end_of_the_edit_visible_without_changing_it() {
+        let mut app = demo_app(Config::basics());
+        app.begin_options();
+        let value = "a-very-long-worktree-name-END";
+        let opts = app.opts.as_mut().unwrap();
+        opts.row = 4;
+        opts.editing = Some(value.into());
+        for (w, h) in [(30, 8), (40, 12), (100, 30)] {
+            let buf = render_snapshot(&mut app, w, h);
+            let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+            assert!(text.contains("END▌"), "edit tail missing at {w}x{h}: {text}");
+            assert_eq!(app.opts.as_ref().unwrap().editing.as_deref(), Some(value));
+        }
+    }
+
+    #[test]
+    fn compact_header_keeps_active_unicode_tab_visible_and_clickable() {
+        let mut app = demo_app(Config::basics());
+        app.tabs[app.active].name = "日本語 👩‍💻".into();
+        let (spans, chips) = header_layout(&app, 30);
+        let shown: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(shown.contains("日本語"));
+        assert!(houston_core::text::width(&shown) <= 30);
+        assert_eq!(header_tab_at(&app, chips[0].col, 30), Some(app.active));
+        assert_eq!(inner(Rect::new(10, 5, 30, 8)), Rect::new(12, 6, 26, 6));
+    }
+
+    #[test]
     fn renders_at_absurd_sizes_without_panicking() {
         let sizes = [
+            (0, 0),
             (1, 1),
             (1, 40),
             (40, 1),
@@ -2296,6 +2508,9 @@ mod tests {
             (20, 3),
             (30, 10),
             (80, 24),
+            (120, 40),
+            (344, 90),
+            (60, 120),
             (250, 4),
             (4, 250),
         ];

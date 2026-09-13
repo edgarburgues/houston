@@ -261,22 +261,24 @@ pub fn render(frame: &mut Frame, body: Rect, world: &World, o: &Options) {
     // Width first: the title and the preview are clipped to the box that will
     // actually be drawn, not to a constant that guesses at it.
     let w = 76u16.min(body.width.saturating_sub(6)).max(24);
-    let text_w = w.saturating_sub(4) as usize;
+    let text_w = (if body.width < 80 { body.width } else { w }).saturating_sub(4) as usize;
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::styled(clip(&o.title, text_w), Style::new().fg(p.grey)));
     lines.push(Line::raw(""));
 
-    let lw = FIELDS.iter().map(|f| f.label().len()).max().unwrap_or(0);
+    let lw = FIELDS.iter().map(|f| f.label().len()).max().unwrap_or(0).min(text_w.saturating_sub(5) / 3);
+    let value_w = text_w.saturating_sub(lw + 4);
     for (i, f) in FIELDS.iter().enumerate() {
         let selected = i == o.row;
         let editing = selected && o.editing.is_some();
         let shown = if editing {
-            format!("{}▌", o.editing.clone().unwrap_or_default())
+            houston_core::text::edit_line(o.editing.as_deref().unwrap_or_default(), value_w)
         } else {
             let v = o.value(*f);
             if v.is_empty() { "—".into() } else { v }
         };
-        let pad = " ".repeat(lw - f.label().len());
+        let label = clip(f.label(), lw);
+        let pad = " ".repeat(lw.saturating_sub(houston_core::text::width(&label)));
         let label_style = if selected {
             Style::new().fg(p.accent).add_modifier(Modifier::BOLD)
         } else {
@@ -291,7 +293,7 @@ pub fn render(frame: &mut Frame, body: Rect, world: &World, o: &Options) {
         };
         let mut spans = vec![
             Span::styled(if selected { "› " } else { "  " }, label_style),
-            Span::styled(f.label().to_string(), label_style),
+            Span::styled(label, label_style),
             Span::raw(format!("{pad}  ")),
             Span::styled(shown, value_style),
         ];
@@ -317,8 +319,14 @@ pub fn render(frame: &mut Frame, body: Rect, world: &World, o: &Options) {
     lines.push(Line::styled(keys, Style::new().fg(p.grey).add_modifier(Modifier::DIM)));
 
     let h = (lines.len() as u16 + 2).min(body.height.saturating_sub(2));
-    let inner = draw_modal(frame, body, w, h, false, p.accent, " How this chat opens ");
-    frame.render_widget(Paragraph::new(lines), inner);
+    let title = if body.width < 50 || body.height < 12 {
+        format!(" {} ", o.field().label())
+    } else { " How this chat opens ".into() };
+    let inner = draw_modal(frame, body, w, h, false, p.accent, &title);
+    // Follow the selected field when the terminal cannot show the whole form.
+    let selected_line = o.row + 2;
+    let scroll = selected_line.saturating_add(1).saturating_sub(inner.height as usize);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
 }
 
 use houston_core::text::clip;

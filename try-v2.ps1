@@ -1,37 +1,33 @@
-# Try Houston 2.0 WITHOUT touching your v1 install.
-#
-#   - runs the v2 binary from target\release (your ~/.local/bin/houston.exe,
-#     the v1 you use daily, is never replaced);
-#   - points HOUSTON_HOME at a COPY of your store, so everything v2 writes
-#     (config-v2.json, caches, last-use, the basics layout it provisions) lands
-#     in the sandbox — your real ~/.claude/houston is untouched.
-#
-# Your real missions/accounts still show: missions are scanned from the
-# untouched ~/.claude*/projects, and the copied accounts.json points at your
-# real per-account dirs (reading them is fine; a quota probe may refresh a
-# lapsed token there — the same refresh Claude/v1 already do — nothing else).
-#
-# Usage:  .\try-v2.ps1            (open the TUI)
-#         .\try-v2.ps1 doctor     (or any verb)
-#         .\try-v2.ps1 -Reset     (wipe the sandbox and re-copy the store)
+#requires -Version 7.0
+# Open a fresh disposable Houston home. No real accounts or credentials are copied.
 [CmdletBinding()]
-param([switch]$Reset, [Parameter(ValueFromRemainingArguments)] $Args)
-
+param([Parameter(ValueFromRemainingArguments)][string[]]$CommandArgs)
 $ErrorActionPreference = 'Stop'
-$repo = Split-Path $MyInvocation.MyCommand.Path
-$bin  = Join-Path $repo 'target\release\houston.exe'
-if (-not (Test-Path $bin)) { throw "build it first:  cargo build --release  (in $repo)" }
-
-$sandbox = Join-Path $env:TEMP 'houston2-sandbox'
-$real    = Join-Path $env:USERPROFILE '.claude\houston'
-
-if ($Reset -and (Test-Path $sandbox)) { Remove-Item -Recurse -Force $sandbox }
-if (-not (Test-Path $sandbox)) {
-    New-Item -ItemType Directory $sandbox | Out-Null
-    if (Test-Path $real) { Copy-Item -Recurse -Force (Join-Path $real '*') $sandbox }
+$binary = Join-Path $PSScriptRoot 'target/release/houston.exe'
+if (-not $IsWindows) { $binary = Join-Path $PSScriptRoot 'target/release/houston' }
+if (-not (Test-Path -LiteralPath $binary)) { throw 'Build first: cargo build --locked --release -p houston' }
+$previewRoot = Join-Path ([IO.Path]::GetTempPath()) ('houston-preview-' + [guid]::NewGuid().ToString('N'))
+$overrides = @{
+    HOME = $previewRoot
+    USERPROFILE = $previewRoot
+    HOUSTON_HOME = (Join-Path $previewRoot 'store')
+    HOUSTON_SHARED_DIR = (Join-Path $previewRoot 'shared')
+    HOUSTON_ACCOUNTS_DIR = (Join-Path $previewRoot 'accounts')
+    HOUSTON_DEFAULT_SCOPE = '0'
+    CLAUDE_CONFIG_DIR = (Join-Path $previewRoot 'claude-config')
 }
-
-$env:HOUSTON_HOME = $sandbox
-Write-Host "Houston 2.0 — isolated store: $sandbox" -ForegroundColor Cyan
-Write-Host "(your v1 binary and real store are untouched)`n" -ForegroundColor DarkGray
-& $bin @Args
+$previous = @{}
+New-Item -ItemType Directory -Path $previewRoot | Out-Null
+try {
+    foreach ($name in $overrides.Keys) {
+        $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        [Environment]::SetEnvironmentVariable($name, $overrides[$name], 'Process')
+    }
+    Write-Host "Disposable preview: $previewRoot (no real accounts or conversations)"
+    & $binary @CommandArgs
+    if ($LASTEXITCODE -ne 0) { throw "Houston exited with code $LASTEXITCODE" }
+} finally {
+    foreach ($name in $previous.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process')
+    }
+}

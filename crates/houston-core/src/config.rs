@@ -375,7 +375,8 @@ impl Config {
             }
             // Genuinely absent: the default is the whole truth, and saving it is
             // exactly what first-run provisioning does.
-            Err(_) => Config::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(_) => Config { unreadable: true, ..Config::default() },
         }
     }
 
@@ -435,6 +436,19 @@ mod tests {
         let err = cfg.save_to(&p).expect_err("saving the stand-in over the real file must fail");
         assert!(err.to_string().contains("refusing to overwrite"), "{err}");
         assert_eq!(fs::read(&p).unwrap(), original, "not one byte of the user's file may change");
+    }
+
+    #[test]
+    fn an_io_error_is_not_treated_as_a_missing_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::create_dir(&path).unwrap();
+        let cfg = Config::load_from(path.clone());
+        assert!(cfg.unreadable);
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, b"original").unwrap();
+        assert!(cfg.save_to(&path).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"original");
     }
 
     /// The flag is about THIS load, not about content: it must never round-trip

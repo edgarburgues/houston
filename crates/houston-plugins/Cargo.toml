@@ -3,7 +3,7 @@ name = "houston-plugins"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
-description = "The WASM plugin host for Houston 2.0 — a fuel-metered sandbox over a tiny bytes-in/bytes-out ABI."
+description = "The WASM plugin host for Houston 2.0 — a process-isolated sandbox over a tiny bytes-in/bytes-out ABI."
 
 [dependencies]
 houston-api = { path = "../houston-api" }

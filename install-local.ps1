@@ -27,7 +27,10 @@ $dest = Join-Path $env:USERPROFILE '.local\bin\houston.exe'
 if (-not $NoBuild) {
     $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
     Push-Location $repo
-    try { cargo build --release -p houston } finally { Pop-Location }
+    try {
+        cargo build --locked --release -p houston
+        if ($LASTEXITCODE -ne 0) { throw "cargo build failed; installation cancelled" }
+    } finally { Pop-Location }
 }
 if (-not (Test-Path $exe)) { throw "not built: $exe" }
 
@@ -38,9 +41,13 @@ try {
 } catch [System.IO.IOException] {
     # Locked, so it is running. Rename it aside — permitted even while executing —
     # and drop the new one in its place.
-    $aside = "$dest.old-{0}" -f (Get-Date -Format 'yyyyMMddHHmmss')
+    $aside = "$dest.old-$([guid]::NewGuid().ToString('N'))"
     Move-Item $dest $aside -Force
-    Copy-Item $exe $dest -Force
+    try { Copy-Item $exe $dest -Force -ErrorAction Stop }
+    catch {
+        Move-Item -LiteralPath $aside -Destination $dest -Force
+        throw
+    }
     $how = "installed alongside $running running instance(s); old binary parked at $(Split-Path $aside -Leaf)"
 }
 

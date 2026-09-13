@@ -91,32 +91,7 @@ pub fn set_sub_object(obj: &mut Obj, key: &str, sub: Obj) {
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "cfg".into());
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // Keep the original mode when there is one; 0600 for new files.
-        let mode = std::fs::metadata(path).map(|m| {
-            use std::os::unix::fs::PermissionsExt;
-            m.permissions().mode() & 0o777
-        });
-        opts.mode(mode.unwrap_or(0o600));
-    }
-    {
-        use std::io::Write;
-        let mut f = opts.open(&tmp)?;
-        f.write_all(bytes)?;
-        f.flush()?;
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
+    crate::atomic::write(path, bytes)
 }
 
 #[cfg(test)]

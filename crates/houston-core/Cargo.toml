@@ -20,5 +20,14 @@ base64 = "0.22"
 # OS CSPRNG for generating the release-signing key.
 getrandom = "0.3"
 
+unicode-width = "0.2"
+unicode-segmentation = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

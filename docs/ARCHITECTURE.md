@@ -1,7 +1,7 @@
 # Houston 2.0 — architecture
 
-Houston 2.0 is a **ground-up rewrite in Rust** of the Go v1 (which still lives
-on `main` and stays installed until 2.0 reaches parity). The goal, in one line:
+Houston is the **Rust implementation**. The local tree also retains Go v1
+for historical reference; Cargo builds the five Rust crates only. The goal, in one line:
 
 > Be to a session manager what **Neovim** is to an editor — a small, fast,
 > stable core, with an interface that is **absurdly customizable out of the
@@ -69,7 +69,7 @@ ship in the box"). The API surface a module can claim:
 | **Command** | a palette entry / CLI verb with its own handler |
 | **Keybind** | keys, global or per-widget, bound to commands |
 | **Transform** | patches over core data streams (mission rows, preview blocks) |
-| **Segment** | statusline contribution. Nothing may execute during a render — Claude Code debounces the status line and cancels in-flight scripts — so a segment is a file the render reads, never a call it makes |
+| **Segment** | statusline contribution — nothing may execute during a render, so a segment is a file the render reads, never a call it makes |
 | **Gate** | pre-launch hook (allow/deny/ask) |
 | **Theme** | colors + layout defaults |
 
@@ -77,11 +77,10 @@ Two panes are worth naming because they are the answer to "how do I show X":
 
 - **`probe`** — a pane whose content is a command you declare or a file something
   else writes (`run` / `read` in its pane settings, refreshed off the render
-  thread, output sanitized, age shown). "Show me the server" needs no code. A
-  command here is admissible where one from a plugin manifest is not because of
-  its ORIGIN: the config is the user's own file, living next to their
-  credentials — whoever can write it can already read those, so it grants an
-  attacker nothing. A manifest is third-party content.
+  thread, output sanitized, age shown). "Show me the server" needs no code, and
+  a command from the user's own config is admissible where one from a plugin
+  manifest is not: the user already controls their configuration, while a
+  manifest arrives with the plugin.
 - **`settings`** — Houston's own configuration screen, on the synthetic tab reached
   with `0`. Driven by `houston-core::settings_schema`, which names, per row, WHO
   writes it: values go through `policy`, the status line through
@@ -156,24 +155,32 @@ Two rules follow, and both are load-bearing:
 | Crate | Role |
 |---|---|
 | `houston-core` | kernel: model, scan, store, accounts, config, launch, resume — pure logic, no UI |
-| `houston-api` *(later)* | the versioned component contract plugins build against (traits + wasm interface) |
+| `houston-api` | the versioned component contract plugins build against (traits + wasm interface) |
 | `houston-tui` | the layout engine: `Node`/`Widget`, focus, render; built-in widgets |
 | `houston` (bin) | wires core + tui, CLI subcommands, plugin host |
 | `houston-plugins` | the plugin runtime: the wasm host, in its own killable process |
 
-## Kernel boundary — "minimal radical"
-Only the irreducible value is core: **discover sessions, multi-account, launch
-/ resume claude, auth+quota, statusline, self-update**. Everything else —
-including parts of the v1 module system — is **rebuilt on top of the new Widget
-interface** rather than ported. `fleet`, `provision`, `export` do not ship in
-the base template; they return as optional widgets/commands if wanted.
+## Shipped boundary
 
-## Roadmap
-- **Phase 0** ✅ fork on `v2`, Cargo workspace, container engine skeleton (this).
-- **Phase 1** ✅ kernel port: model + scan + store + accounts (data, no UI).
-- **Phase 2** ✅ real built-in widgets over the engine (filters/missions/preview).
-- **Phase 3** ✅ config-driven layout tree (config-v2.json), B&W theme palette, drag-resize persisted.
-- **Phase 4a** ✅ houston-api contract + plugin discovery + exec-backed PluginWidget (dockable anywhere). **4b** ✅ WASM host (wasmtime): sandboxed compiled plugins on their own thread, timeout-bounded; real compiled example loads end-to-end.
-- **Phase 5** ✅ CLI verbs doctor/accounts/run/statusline (basic). OAuth/usage subsystem ✅ (live multi-account quota bars in statusline, token refresh under flock, quota-aware balancer in run). Remaining before cutover: houston-basics bundle + resume verb + browse routing. Strip is N/A (fleet/provision/export were never ported). **Cutover to `main` is user-gated — deferred.**
+The CLI includes fleet configuration, provisioning and export alongside session
+scanning, account selection, authentication, statusline and signed self-update.
+Built-in and WASM widgets share the configurable container layout. WASM calls
+are submitted to a bounded worker queue; rendering and input do not wait for a
+guest. Geometry and selection changes request a new snapshot.
 
-Nothing here touches v1: `main` keeps the Go binary, `v2` is the rewrite.
+Non-interactive probes have a deadline and capped stdout/stderr. Timeout and
+output overflow terminate the command tree on a best-effort basis and reap the
+direct child. Interactive Claude sessions keep inherited terminal I/O.
+
+Persistent metadata and programs use read-modify-write under filesystem locks.
+An unreadable metadata file is an error, never an empty store to overwrite.
+Atomic writes use exclusive, per-write temporary files. Failed layout saves
+remain pending and are reported in the UI.
+
+## Development
+
+Run `pwsh -File packaging/Test.ps1` to isolate tests from real application and
+Claude directories. `try-v2.ps1` opens a fresh disposable home without copying
+accounts or credentials. The Go v1 implementation, kept in this
+repository's history at tag `v1.2.1`, had an executable module system; those
+modules are not supported by the Rust runtime.

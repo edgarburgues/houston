@@ -1,0 +1,27 @@
+name: ci
+on:
+  push:
+    branches: ['**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup update stable
+      - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests with isolated application paths
+        shell: pwsh
+        run: ./packaging/Test.ps1
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Installer regressions
+        shell: pwsh
+        run: ./packaging/Test-Scripts.ps1

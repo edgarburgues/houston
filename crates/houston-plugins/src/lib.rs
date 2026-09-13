@@ -15,15 +15,11 @@
 //! memory — no fs, no net, no syscalls (capability grants via WASI preview2
 //! are a future extension; today "no capability" holds by construction).
 //!
-//! Each plugin runs on its **own thread**, owning its wasmtime Store; the UI
-//! talks to it over a channel and waits with a timeout. Two failure modes,
-//! both survivable by the UI:
-//!   - the plugin TRAPS (illegal op, OOB) → a clean `Err` from the call;
-//!   - the plugin HANGS (infinite loop) → the call times out and returns
-//!     `Err`; the runaway thread is abandoned but the UI never blocks.
-//! We deliberately avoid wasm fuel/epoch async-interruption: its out-of-budget
-//! trap aborts (non-unwinding) instead of returning cleanly on some Windows
-//! toolchains. The thread+timeout model is portable and keeps the UI alive.
+//! The TUI submits calls to a worker without waiting. Each guest runs in a
+//! separate killable process, containing WasmHost's internal execution thread.
+//! ProcHost bounds request writes and response reads, and kills the child on
+//! timeout or protocol failure. In-process WasmHost is for that child and tests;
+//! it cannot stop a runaway thread and must not host untrusted guests in the UI.
 
 #![allow(clippy::doc_lazy_continuation)]
 use anyhow::{anyhow, Context};
@@ -81,9 +77,8 @@ pub fn env_is_denied(name: &str) -> bool {
 }
 
 /// Strip everything a plugin has no business seeing from a child's environment.
-/// Used for BOTH plugin backends: the wasm host child (defence in depth — its
-/// guest has no WASI and cannot read env at all) and exec plugins, where it is
-/// the only thing standing between a plugin and the credential path.
+/// Defence in depth for the WASM host child; its guest has no WASI and cannot
+/// read the environment. Houston no longer executes script plugins.
 pub fn scrub_env(cmd: &mut std::process::Command) {
     for (name, _) in std::env::vars_os() {
         let n = name.to_string_lossy();
@@ -206,7 +201,7 @@ struct Proc {
 
 struct Live {
     child: std::process::Child,
-    stdin: std::process::ChildStdin,
+    stdin: Option<std::process::ChildStdin>,
     lines: mpsc::Receiver<String>,
 }
 
@@ -277,7 +272,7 @@ impl Proc {
                 }
             }
         });
-        self.live = Some(Live { child, stdin, lines: rx });
+        self.live = Some(Live { child, stdin: Some(stdin), lines: rx });
         Ok(())
     }
 
@@ -302,9 +297,19 @@ impl Proc {
             while live.lines.try_recv().is_ok() {}
             let mut msg = serde_json::to_vec(c)?;
             msg.push(b'\n');
-            live.stdin.write_all(&msg).context("writing to the plugin host")?;
-            live.stdin.flush().context("flushing to the plugin host")?;
-            match live.lines.recv_timeout(timeout) {
+            // Startup may hang before the guest reads stdin. The write itself
+            // must share the deadline, including requests larger than a pipe.
+            let started = std::time::Instant::now();
+            let mut stdin = live.stdin.take().ok_or_else(|| anyhow!("plugin stdin is unavailable"))?;
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let result = stdin.write_all(&msg).and_then(|_| stdin.flush());
+                let _ = tx.send((stdin, result));
+            });
+            let (stdin, written) = rx.recv_timeout(timeout).map_err(|_| anyhow!("plugin timed out writing request"))?;
+            live.stdin = Some(stdin);
+            written.context("writing to the plugin host")?;
+            match live.lines.recv_timeout(timeout.saturating_sub(started.elapsed())) {
                 Ok(line) => {
                     // The child replies either a Response or {"error": "..."};
                     // checking for the error field first keeps a plugin that

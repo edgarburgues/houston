@@ -15,6 +15,7 @@ use crate::world::{parse_color, World};
 use crate::Widget;
 use houston_api as api;
 use houston_plugins::ProcHost;
+use std::sync::mpsc;
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -27,7 +28,12 @@ pub struct PluginWidget {
     id: String,
     title: String,
     /// None when the host could not even be prepared; `error` says why.
-    host: Option<ProcHost>,
+    requests: Option<mpsc::SyncSender<api::Call>>,
+    replies: Option<mpsc::Receiver<Result<api::Response, String>>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    area: Rect,
+    last_request: Option<serde_json::Value>,
+    pending_status: Option<String>,
     settings: serde_json::Value,
     cache: Option<api::Response>,
     loaded: bool,
@@ -38,11 +44,25 @@ impl PluginWidget {
     /// A WASM-backed plugin widget. A load failure is surfaced as the widget's
     /// error (visible, never a crash).
     pub fn new_wasm(id: String, title: String, host: anyhow::Result<ProcHost>, settings: serde_json::Value) -> Self {
-        let (host, error, loaded) = match host {
-            Ok(h) => (Some(h), None, false),
-            Err(e) => (None, Some(format!("load failed: {e:#}")), true),
+        let (requests, replies, worker, error, loaded) = match host {
+            Ok(host) => {
+                let (tx, rx) = mpsc::sync_channel::<api::Call>(16);
+                let (reply_tx, reply_rx) = mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    while let Ok(call) = rx.recv() {
+                        if reply_tx.send(host.call(&call).map_err(|e| format!("{e:#}"))).is_err() {
+                            break;
+                        }
+                    }
+                });
+                (Some(tx), Some(reply_rx), Some(worker), None, false)
+            }
+            Err(e) => (None, None, None, Some(format!("load failed: {e:#}")), true),
         };
-        PluginWidget { id, title, host, settings, cache: None, loaded, error }
+        PluginWidget {
+            id, title, requests, replies, worker, settings, cache: None, loaded, error,
+            area: Rect::default(), last_request: None, pending_status: None,
+        }
     }
 
     fn request(&self, area: Rect, world: &World, focused: bool) -> api::RenderRequest {
@@ -66,33 +86,47 @@ impl PluginWidget {
         }
     }
 
-    /// Run one call against the backend. Updates the cache or records an
-    /// error; never panics, never blocks past the timeout. Returns a footer
-    /// message the plugin asked for, if any.
+    /// Submit without waiting for the guest. Backpressure bounds queued input.
     fn call(&mut self, call: api::Call) -> Option<String> {
-        self.loaded = true;
-        let Some(host) = &self.host else { return None };
-        let result = host.call(&call).map_err(|e| format!("{e:#}"));
-        match result {
-            Ok(resp) => {
-                // Effects are the only channel out of a plugin. A status line is
-                // attributed to the plugin BY THE HOST and clipped, so a plugin
-                // can neither impersonate Houston nor flood the footer.
-                let status = resp.effects.iter().find_map(|e| match e {
-                    api::Effect::Status { text } => {
-                        let one_line: String = text.chars().filter(|c| *c != '\n' && *c != '\r').take(160).collect();
-                        (!one_line.trim().is_empty()).then(|| format!("[{}] {}", self.id, one_line))
-                    }
-                });
-                self.cache = Some(resp);
-                self.error = None;
-                status
-            }
-            Err(e) => {
-                self.error = Some(e);
-                None
+        let Some(tx) = &self.requests else { return None };
+        match tx.try_send(call) {
+            Ok(()) => { self.loaded = true; None }
+            Err(mpsc::TrySendError::Full(_)) => Some(format!("[{}] busy; input queue is full", self.id)),
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                self.error = Some("plugin worker stopped".into());
+                Some(format!("[{}] plugin worker stopped", self.id))
             }
         }
+    }
+
+    fn collect(&mut self) {
+        let Some(rx) = &self.replies else { return };
+        while let Ok(result) = rx.try_recv() {
+            match result {
+                Ok(resp) => {
+                    self.pending_status = resp.effects.iter().find_map(|e| match e {
+                        api::Effect::Status { text } => {
+                            let text = houston_core::segments::sanitize(text, 160);
+                            (!text.trim().is_empty()).then(|| format!("[{}] {}", self.id, text))
+                        }
+                    }).or(self.pending_status.take());
+                    self.cache = Some(resp);
+                    self.error = None;
+                }
+                Err(e) => self.error = Some(e),
+            }
+        }
+    }
+}
+
+impl Drop for PluginWidget {
+    fn drop(&mut self) {
+        // Stop accepting input and discard queued work. Wait only for the
+        // current bounded call so ProcHost's destructor reaps its child before
+        // Houston exits; abandoning the worker could orphan a spinning guest.
+        self.requests.take();
+        self.replies.take();
+        if let Some(worker) = self.worker.take() { let _ = worker.join(); }
     }
 }
 
@@ -153,7 +187,7 @@ impl Widget for PluginWidget {
     fn on_key(&mut self, key: char, world: &mut World) -> bool {
         // Any key routed here (the pane is focused) refreshes via an Event
         // call; 'r' is the conventional manual refresh.
-        let req = self.request(Rect::new(0, 0, 0, 0), world, true);
+        let req = self.request(self.area, world, true);
         if let Some(s) = self.call(api::Call::Event { event: api::Event::Key { ch: key }, req }) {
             world.status = s;
         }
@@ -161,27 +195,31 @@ impl Widget for PluginWidget {
     }
 
     fn on_click(&mut self, row: u16, col: u16, world: &mut World) {
-        let req = self.request(Rect::new(0, 0, 0, 0), world, true);
+        let req = self.request(self.area, world, true);
         if let Some(s) = self.call(api::Call::Event { event: api::Event::Click { row, col }, req }) {
             world.status = s;
         }
     }
 
     fn on_scroll(&mut self, up: bool, world: &mut World) {
-        let req = self.request(Rect::new(0, 0, 0, 0), world, false);
+        let req = self.request(self.area, world, false);
         if let Some(s) = self.call(api::Call::Event { event: api::Event::Scroll { up }, req }) {
             world.status = s;
         }
     }
 
     fn post_render(&mut self, area: Rect, world: &World, focused: bool) {
-        // Lazy first load: one Render call once we know the pane geometry.
-        // post_render only has &World, so a status effect from the very first
-        // load is dropped rather than shown — an interaction will surface it.
-        if !self.loaded {
-            let req = self.request(area, world, focused);
-            let _ = self.call(api::Call::Render { req });
+        self.collect();
+        self.area = area;
+        if self.requests.is_none() { return; }
+        let req = self.request(area, world, focused);
+        let value = serde_json::to_value(&req).ok();
+        if (!self.loaded || value != self.last_request) && self.call(api::Call::Render { req }).is_none() {
+            self.last_request = value;
         }
+    }
+    fn take_status(&mut self) -> Option<String> {
+        self.pending_status.take()
     }
     fn commands(&self) -> Vec<Cmd> {
         vec![Cmd::widget("r", "refresh", &self.id)]
@@ -209,6 +247,25 @@ mod tests {
         );
         std::mem::forget(tmp);
         w
+    }
+
+    #[test]
+    fn render_is_nonblocking_and_events_keep_the_latest_geometry() {
+        let mut widget = PluginWidget::new_wasm("p".into(), "P".into(), Err(anyhow::anyhow!("unused")), serde_json::Value::Null);
+        let (tx, rx) = mpsc::sync_channel(16);
+        widget.requests = Some(tx);
+        widget.loaded = false;
+        widget.error = None;
+        let mut world = empty_world();
+        widget.post_render(Rect::new(0, 0, 30, 10), &world, true);
+        assert!(matches!(rx.try_recv().unwrap(), api::Call::Render { req } if req.width == 30 && req.height == 10));
+        widget.post_render(Rect::new(0, 0, 30, 10), &world, true);
+        assert!(rx.try_recv().is_err(), "unchanged frame must not call the guest");
+        widget.post_render(Rect::new(0, 0, 60, 20), &world, true);
+        assert!(matches!(rx.try_recv().unwrap(), api::Call::Render { req } if req.width == 60 && req.height == 20));
+        widget.on_key('r', &mut world);
+        assert!(matches!(rx.try_recv().unwrap(), api::Call::Event { req, .. } if req.width == 60 && req.height == 20));
+        // No worker has replied: all these UI operations still completed.
     }
 
     #[test]
@@ -240,6 +297,6 @@ mod tests {
         let w = PluginWidget::new_wasm("only".into(), "Only".into(), Err(anyhow::anyhow!("x")), serde_json::Value::Null);
         // `host` is the sole execution field; there is no command, no cwd, no
         // shell. If that changes, this file needs a security review, not a fix.
-        assert!(w.host.is_none());
+        assert!(w.requests.is_none());
     }
 }

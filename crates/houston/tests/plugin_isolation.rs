@@ -96,6 +96,24 @@ fn a_broken_module_fails_without_leaving_a_child() {
 }
 
 #[test]
+fn a_hung_start_cannot_block_a_request_larger_than_the_pipe() {
+    let start_loop = r#"(module
+      (func $start (loop $forever br $forever)) (start $start)
+    )"#;
+    let (host, _dir) = host_for(start_loop, Duration::from_millis(400));
+    let call = api::Call::Render {
+        req: api::RenderRequest {
+            settings: serde_json::json!({"large": "x".repeat(2 << 20)}),
+            ..Default::default()
+        },
+    };
+    let started = Instant::now();
+    assert!(host.call(&call).unwrap_err().to_string().contains("timed out"));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(!host.is_running());
+}
+
+#[test]
 fn dropping_the_host_reaps_its_child() {
     let json = r#"{"lines":[]}"#;
     let (host, _dir) = host_for(&responder(json), Duration::from_secs(10));

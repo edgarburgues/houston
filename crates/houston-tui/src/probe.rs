@@ -58,6 +58,7 @@ const DEFAULT_EVERY: Duration = Duration::from_secs(60);
 /// Lines kept from the output. A pane is a few rows; a command that prints a
 /// thousand lines is a misconfiguration, not something to hold in memory.
 const MAX_LINES: usize = 40;
+const MAX_BYTES: usize = 1 << 20;
 /// Characters kept per line, sanitized.
 const MAX_COLS: usize = 200;
 
@@ -213,40 +214,19 @@ fn fetch(source: &Source) -> Result<Vec<String>, String> {
     match source {
         Source::Unset(why) => Err((*why).to_string()),
         Source::Read(path) => {
-            let body = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-            Ok(clean(&body))
+            let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+            let bytes = houston_core::process::read_bounded(file, MAX_BYTES).map_err(|e| e.to_string())?;
+            Ok(clean(&String::from_utf8_lossy(&bytes)))
         }
         Source::Run(argv) => {
             let (exe, args) = argv.split_first().ok_or_else(|| "empty argv".to_string())?;
             let mut cmd = std::process::Command::new(exe);
-            cmd.args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            #[cfg(windows)]
-            {
-                // The TUI owns the terminal; a child console would flash over it.
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                cmd.creation_flags(CREATE_NO_WINDOW);
-            }
-            let child = cmd.spawn().map_err(|e| format!("{exe}: {e}"))?;
-
-            // Bound the WAIT, as `agents::list` does: killing the child would need
-            // a platform handle this crate deliberately does not depend on, and a
-            // straggler costs nothing — it holds no lock and owns no terminal.
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(child.wait_with_output());
-            });
-            let out = match rx.recv_timeout(RUN_TIMEOUT) {
-                Ok(Ok(out)) => out,
-                Ok(Err(e)) => return Err(format!("{exe}: {e}")),
-                Err(_) => return Err(format!("{exe}: sin respuesta en {}s", RUN_TIMEOUT.as_secs())),
-            };
+            cmd.args(args);
+            let out = houston_core::process::output(&mut cmd, RUN_TIMEOUT, MAX_BYTES)
+                .map_err(|e| format!("{exe}: {e}"))?;
             if !out.status.success() {
                 let err = String::from_utf8_lossy(&out.stderr);
-                let first = clean(&err).into_iter().next().unwrap_or_else(|| "sin salida de error".into());
+                let first = clean(&err).into_iter().next().unwrap_or_else(|| "no error output".into());
                 return Err(format!("exit {}: {first}", out.status.code().unwrap_or(-1)));
             }
             Ok(clean(&String::from_utf8_lossy(&out.stdout)))
@@ -325,7 +305,7 @@ impl Widget for ProbeWidget {
     }
 
     fn commands(&self) -> Vec<crate::command::Command> {
-        vec![crate::command::Command::widget("r", "refrescar ahora", "probe")]
+        vec![crate::command::Command::widget("r", "refresh now", "probe")]
     }
 
     fn configure(&mut self, settings: &serde_json::Value) {

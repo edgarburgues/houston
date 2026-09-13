@@ -1,6 +1,5 @@
 //! houston-api — the versioned component contract Houston 2.0 plugins build
-//! against. Language-agnostic (serde/JSON), so the SAME contract serves both
-//! bindings: compiled WASM plugins and exec-JSON scripts. Built-in widgets use
+//! against. Language-agnostic (serde/JSON), used by compiled WASM plugins. Built-in widgets use
 //! the richer in-process `Widget` trait directly; this is the shape everything
 //! crosses the plugin boundary as.
 //!

@@ -40,6 +40,7 @@ pub mod hooks;
 pub mod launch;
 pub mod model;
 pub mod paths;
+pub mod process;
 pub mod plugin;
 pub mod policy;
 pub mod pathenc;

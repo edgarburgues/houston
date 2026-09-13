@@ -22,7 +22,7 @@ use crate::world::Filter;
 // ---------------------------------------------------------------- Filters --
 
 #[derive(Default)]
-pub struct FiltersWidget;
+pub struct FiltersWidget { offset: std::cell::Cell<usize> }
 
 impl Widget for FiltersWidget {
     fn id(&self) -> &str {
@@ -35,7 +35,10 @@ impl Widget for FiltersWidget {
     fn render(&self, area: Rect, frame: &mut Frame, world: &World, focused: bool) {
         let p = &world.palette;
         let mut lines = Vec::new();
-        for f in Filter::ORDER {
+        let selected = Filter::ORDER.iter().position(|f| *f == world.filter).unwrap_or(0);
+        let offset = selected.saturating_add(1).saturating_sub(area.height as usize);
+        self.offset.set(offset);
+        for f in Filter::ORDER.into_iter().skip(offset).take(area.height as usize) {
             let sel = world.filter == f;
             let style = match (sel, focused) {
                 (true, true) => Style::new().fg(p.sel_fg).bg(p.sel_bg).add_modifier(Modifier::BOLD),
@@ -64,12 +67,12 @@ impl Widget for FiltersWidget {
     }
 
     fn on_click(&mut self, row: u16, _col: u16, world: &mut World) {
-        if let Some(f) = Filter::ORDER.get(row as usize) {
+        if let Some(f) = Filter::ORDER.get(self.offset.get() + row as usize) {
             world.set_filter(*f);
         }
     }
 
-    fn on_scroll(&mut self, _up: bool, _world: &mut World) {}
+    fn on_scroll(&mut self, up: bool, world: &mut World) { self.on_key(if up { 'k' } else { 'j' }, world); }
 
     fn commands(&self) -> Vec<Command> {
         vec![
@@ -139,7 +142,9 @@ impl Widget for MissionsWidget {
                 None => (" ", p.fg),
             };
             let body_w = (area.width as usize).saturating_sub(1);
-            let text = clip(&format!("{pin} {date}  {}", m.title), body_w);
+            let label = if area.width < 60 { format!("{pin} {}", m.title) }
+                else { format!("{pin} {date}  {}", m.title) };
+            let text = clip(&label, body_w);
             let style = if row == world.cursor {
                 if focused {
                     Style::new().fg(p.sel_fg).bg(p.sel_bg).add_modifier(Modifier::BOLD)

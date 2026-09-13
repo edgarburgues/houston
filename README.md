@@ -1,89 +1,123 @@
-# 🚀 Houston
+# Houston
 
-Mission control for **Claude Code**: run several accounts behind one command,
-and browse, organize and resume every conversation from one TUI.
+A terminal session manager for Claude Code, written in Rust. Browse and resume
+conversations, balance multiple accounts by quota, and arrange the interface
+as a configurable tree of panels.
 
-A small Rust kernel under an interface that is customizable out of the box:
-the whole screen is a tree of panes defined in config, every view is a widget,
-and extensions are sandboxed WASM. (An earlier Go implementation lives on in
-the history — tag `v1.2.1`, branch `v1-final`.)
+## Build and install
 
-## The idea
+With Rust and PowerShell 7 installed, build the current implementation:
 
-Claude Code ties login and onboarding to the authenticated account, not just
-the config directory. Houston gives each account its own `CLAUDE_CONFIG_DIR`
-and shares the data through native OS links:
-
-- **One config dir per account** (`~/.claude-accounts/account-<id>`): its own
-  `/login`, isolated onboarding, the account's real email.
-- **Shared data** (`projects`, `sessions`, `plugins`, …) and user
-  customizations (`skills`, `commands`, `agents`, …) linked into a common
-  `~/.claude-shared` store — junctions on Windows, symlinks elsewhere — so
-  every account sees and resumes **all** conversations.
-- **Quota-aware balancing**: `houston run` and the TUI's resume rank accounts
-  by pressure (each rate-limit window weighted by how far it is from
-  resetting) and pick the least loaded one. Pin with `-a <id>`.
-- **Concurrency-safe**: each terminal carries its account in its own
-  `CLAUDE_CONFIG_DIR`; different terminals run different accounts at once.
-
-## Install
-
-```sh
-cargo build --release -p houston
-# then put target/release/houston(.exe) on PATH — or, on Windows:
-pwsh -File install-local.ps1     # builds and installs without killing a running Houston
+```powershell
+cargo build --locked --release -p houston
+# Windows: build and install to ~/.local/bin without stopping running sessions
+pwsh -File install-local.ps1
 ```
 
-Self-updates are **signed**: releases carry a minisign signature bound to
-their tag, verified against a public key compiled into the binary
-(`houston update`).
+`packaging/Install.ps1` authenticates release downloads using an independently
+installed [minisign](https://github.com/jedisct1/minisign), a pinned public key,
+and the requested release tag, then checks SHA-256 before installing. Invalid
+signatures fail closed. If downloads or minisign are unavailable, a local source
+checkout can be built with Cargo. Bundled local binaries are trusted as part of
+the package; obtain that package from a trusted source. `houston update` verifies
+signatures internally. `-NoProfileEdit` skips shell profile and PATH changes.
+
+For a disposable preview without real accounts or Claude configuration:
+
+```powershell
+pwsh -File try-v2.ps1
+```
+
+The preview intentionally has no real conversations. Normal launches use
+`~/.claude/houston`, per-account config directories and the shared data store.
 
 ## Use
 
+```powershell
+houston accounts add work
+houston accounts add personal
+houston run                     # choose an account by quota; /login when needed
+houston run -a work              # force an account
+houston                         # open the TUI
+houston --help
 ```
-houston                    the TUI: conversations, live sessions, quota, tabs
-houston run [-a <id>] …    launch claude on the best (or a pinned) account
-houston doctor [--fix]     audit accounts, links, config, hooks, retention
-houston usage [--refresh]  per-account quota; --pick explains resume's choice
-houston retention          how long transcripts survive; writes only when told
-houston compat             what Houston assumes about Claude Code, and drift
+
+Account creation provisions its config directory. Accounts have separate logins
+and share conversation data through junctions on Windows or symlinks on Unix.
+Normal launch and statusline paths can repair shared data links; they are not
+read-only diagnostics.
+
+| Command | Purpose |
+|---|---|
+| `houston run [-a <id>] [-- <args>]` | Launch Claude with a selected account |
+| `houston accounts [ls\|add\|rm]` | Manage account registrations |
+| `houston usage [--refresh] [--json\|--pick]` | Inspect quota and explain account selection |
+| `houston live [--json]` | Query running sessions |
+| `houston journal` | Inspect launch and hook events |
+| `houston export <id> [out.md]` | Export a transcript as Markdown |
+| `houston doctor [--fix]` | Audit or explicitly repair configuration |
+| `houston compat` | Report recorded Claude compatibility assumptions |
+| `houston retention [--keep <days>\|--default]` | Inspect or change transcript retention |
+| `houston mcp`, `houston plugin`, `houston policy` | Manage Claude configuration across accounts |
+| `houston hooks [status\|install\|uninstall]` | Manage Claude integration hooks |
+| `houston statusline`, `houston segment` | Render quota and manage extra status text |
+| `houston update [--check]` | Check or install a signed release |
+
+`houston plugin` manages **Claude Code plugins**. Houston's own panel plugins
+are WASM modules using `houston-api`, without WASI filesystem or network access.
+See [plugin examples](examples/plugins/README.md). The old executable Go module
+runtime is not supported in Rust.
+
+## Interface
+
+Use arrows or `j/k` to navigate, `Enter` to resume, `?` for shortcuts, `:` for
+the command palette, `o` for launch options, and `0` for settings. Mouse focus,
+scrolling and border resizing are supported. A running-session warning offers
+resume/fork choices before attaching to an already open conversation.
+
+The interface adapts to the terminal's character grid and each panel's minimum
+usable size. It keeps the configured splits when they fit, then shows two related
+panels side by side or stacked, and finally the focused panel alone. `Tab` /
+`Shift+Tab` cycle all panels; `F10` maximizes the active panel and restores the
+automatic layout. Resizing and maximizing do not overwrite saved proportions.
+`[` / `]` switch tabs. Launch options follow the selected field on short screens;
+long edits in options, settings and the command palette keep their suffix and
+caret visible without changing the value. Unicode clipping preserves grapheme
+clusters. Font size and DPI scaling are controlled by your terminal emulator;
+very small grids necessarily show less content. The renderer is tested from
+0×0 through 344×90 and 60×120 cells.
+
+The layout, per-panel settings and theme live in `config-v2.json`. Built-in
+panels include missions, filters, preview, quota, git, settings and `probe`.
+A probe can read a file or run an explicitly configured argv in the background.
+
+## Development and verification
+
+```powershell
+pwsh -File packaging/Test.ps1
+cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-In the TUI: `Enter` resumes (asking first if the chat is already open
-elsewhere), `o` sets per-mission launch options, digits switch tabs, `0` opens
-Settings, `?` shows every key.
+The test wrapper redirects application paths and fallback home directories to
+a fresh temporary tree; it never copies real credentials. Tests that require
+live services remain ignored by default. CI validates Linux, Windows and macOS.
 
-### Claude Code integration
+| Crate | Responsibility |
+|---|---|
+| `houston-core` | Session data, accounts, configuration, persistence and updates |
+| `houston-api` | JSON contract for WASM panels |
+| `houston-plugins` | Process-isolated WASM host |
+| `houston-tui` | Container layout, built-in widgets and input routing |
+| `houston` | CLI and application entry point |
 
-Houston installs a **status line** (pure read — nothing executes during a
-render) showing every account's quota plus segments any process can
-contribute by writing a file; **hooks** so it learns instantly about sessions
-starting, rate limits and logins; and `claude agents --json` powers live
-`●`/`○` markers with an "already open" prompt. `houston compat` records every
-such surface, how to re-check it, and the Claude Code release it was last
-verified against — they are unversioned and fail silently, so drift is
-reported rather than discovered.
+[Architecture](docs/ARCHITECTURE.md) describes the Rust design. The Go
+implementation this replaced is preserved in this repository's history at tag
+`v1.2.1`; it is not part of a Cargo build.
 
-## Extending
-
-- **Layout is config**: the screen is a `Split`/`Pane` tree in
-  `config-v2.json`; move anything anywhere, drag borders, add tabs.
-- **`probe` panes** show anything a command prints or a file contains,
-  refreshed off the render thread — "show me the server" needs no code.
-- **Plugins are WASM**, run in a killable child process with **no WASI**: no
-  files, no network, no way to reach credentials. There is deliberately no
-  script/exec runtime — an arbitrary command carries the user's privileges,
-  and no manifest field changes that.
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and its
-decisions.
-
-## Platform
-
-Windows, macOS and Linux. Rust ≥ 1.75. The store lives in `~/.claude/houston`
-(`HOUSTON_HOME` overrides it, which is also how the test suite stays away from
-real data).
+Releases are cut from `v2.*` tags. What is published here is a curated tree
+rather than a direct publication of development history, so this commit log is
+shorter than the one it is derived from.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE).

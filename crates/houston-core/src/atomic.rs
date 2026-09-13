@@ -7,7 +7,7 @@
 //!
 //! - **The temp file must be uniquely named.** A fixed `.tmp` lets two writers
 //!   interleave — A writes half, B writes half, A renames — and rename half a
-//!   document into place. The process id makes the collision impossible.
+//!   document into place. An exclusive create and per-write counter separate threads and processes.
 //! - **The rename installs the TEMP file's permissions**, not the target's. So
 //!   creating the temp with the default umask silently WIDENS a 0600 file on
 //!   every write, which is how a credential store quietly became world-readable
@@ -29,15 +29,9 @@ use std::path::Path;
 pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let base = path.file_name().unwrap_or_default().to_string_lossy();
-    // Hidden and pid-tagged: unique per writer, and never mistaken for content
-    // by a directory listing that globs for the real name.
-    let tmp = dir.join(format!(".{base}.{}.tmp", std::process::id()));
-    // A temp left by a previous crash of this same pid would be REOPENED
-    // below, keeping whatever mode it already had, so it goes first.
-    let _ = fs::remove_file(&tmp);
-
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -50,24 +44,48 @@ pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let mode = fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
         opts.mode(mode);
     }
-    {
-        use io::Write;
-        let mut f = opts.open(&tmp)?;
-        f.write_all(bytes)?;
-        f.flush()?;
-    }
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
+    let (tmp, mut file) = loop {
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!(".{base}.{}.{seq}.tmp", std::process::id()));
+        match opts.open(&tmp) {
+            Ok(file) => break (tmp, file),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
         }
+    };
+    use io::Write;
+    let result = file.write_all(bytes).and_then(|_| file.flush());
+    drop(file);
+    let result = result.and_then(|_| fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simultaneous_threads_never_share_a_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for n in 0..8u8 {
+                let (path, barrier) = (&path, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..20 { write(path, &vec![n; 64 * 1024]).unwrap(); }
+                });
+            }
+        });
+        let bytes = fs::read(path).unwrap();
+        assert_eq!(bytes.len(), 64 * 1024);
+        assert!(bytes.iter().all(|b| *b == bytes[0]));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn replaces_content_and_leaves_no_temp_behind() {

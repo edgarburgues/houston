@@ -21,7 +21,7 @@ fn is_builtin(id: &str) -> bool {
 
 fn builtin(id: &str, settings: Option<&serde_json::Value>) -> Box<dyn crate::Widget> {
     let mut w: Box<dyn crate::Widget> = match id {
-        "filters" => Box::new(FiltersWidget),
+        "filters" => Box::new(FiltersWidget::default()),
         "missions" => Box::<MissionsWidget>::default(),
         "basics:quota" => Box::<QuotaWidget>::default(),
         "basics:git" => Box::<GitWidget>::default(),

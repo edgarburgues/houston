@@ -6,6 +6,7 @@
 
 use crate::command::{self, Command};
 use crate::App;
+use houston_core::text::{clip, width};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -30,7 +31,7 @@ pub(crate) fn draw_modal(
     accent: Color,
     title: &str,
 ) -> Rect {
-    let area = centered(body, w, h, top);
+    let area = centered(body, if body.width < 80 { body.width } else { w }, if body.height < 18 { body.height } else { h }, top);
     // Relief margin: clear a ring around the box (2 cols, 1 row), so nearby
     // letters vanish and the panel looks lifted off the page.
     let (mx, my) = (2u16, 1u16);
@@ -96,9 +97,9 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
             Style::new().fg(p.accent).add_modifier(Modifier::BOLD)
         };
         lines.push(Line::styled(title, hstyle));
-        let lw = rows.iter().map(|c| c.label.chars().count()).max().unwrap_or(0);
+        let lw = rows.iter().map(|c| width(&c.label)).max().unwrap_or(0);
         for c in rows {
-            let pad = " ".repeat(lw - c.label.chars().count());
+            let pad = " ".repeat(lw - width(&c.label));
             lines.push(Line::from(vec![
                 Span::raw(" "),
                 Span::styled(c.label, Style::new().fg(p.accent)),
@@ -132,6 +133,16 @@ pub fn render_conflict(frame: &mut Frame, body: Rect, app: &App) {
     let Some(c) = app.conflict_view() else { return };
     let p = &app.world.palette;
     let (name, pid, status, age) = c;
+    if body.width < 60 || body.height < 12 {
+        let inner = draw_modal(frame, body, body.width, body.height, false, p.accent, " Already open ");
+        let lines = vec![Line::raw("f:copy Enter:attach Esc:cancel"),
+            Line::raw("Attach shares a live transcript"),
+            Line::raw(clip(&name, inner.width as usize)),
+            Line::raw(format!("seen {age}s ago; L:recheck"))];
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+
     let mut lines: Vec<Line> = Vec::new();
     // A session with no pid is not on this machine — Claude's registry also lists
     // cloud sessions and disconnected Remote Control ones. Printing "pid 0" would
@@ -183,7 +194,7 @@ pub fn render_palette(frame: &mut Frame, body: Rect, app: &App) {
     let matches = palette_matches(app);
     let sel = app.pal_sel.min(matches.len().saturating_sub(1));
     let w = 66u16.min(body.width.saturating_sub(6)).max(24);
-    let content_w = w.saturating_sub(4) as usize;
+    let content_w = (if body.width < 80 { body.width } else { w }).saturating_sub(4) as usize;
 
     let max_rows = 12usize.min(body.height.saturating_sub(7) as usize).max(1);
     let start = if sel >= max_rows { sel + 1 - max_rows } else { 0 };
@@ -191,7 +202,7 @@ pub fn render_palette(frame: &mut Frame, body: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("› ", Style::new().fg(p.accent).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{}▌", app.pal_input), Style::new().fg(p.fg)),
+        Span::styled(houston_core::text::edit_line(&app.pal_input, content_w.saturating_sub(2)), Style::new().fg(p.fg)),
     ]));
     lines.push(Line::raw(""));
     if matches.is_empty() {
@@ -203,8 +214,8 @@ pub fn render_palette(frame: &mut Frame, body: Rect, app: &App) {
             title.push_str(&format!("  · {}", c.source));
         }
         let label = &c.label;
-        let tclip: String = title.chars().take(content_w.saturating_sub(label.chars().count() + 2)).collect();
-        let gap = content_w.saturating_sub(tclip.chars().count() + label.chars().count()).max(1);
+        let tclip = clip(&title, content_w.saturating_sub(width(label) + 2));
+        let gap = content_w.saturating_sub(width(&tclip) + width(label)).max(1);
         if i == sel {
             let row = format!("{tclip}{}{label}", " ".repeat(gap));
             lines.push(Line::styled(row, Style::new().fg(p.sel_fg).bg(p.sel_bg).add_modifier(Modifier::BOLD)));

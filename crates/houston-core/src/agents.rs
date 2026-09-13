@@ -133,20 +133,8 @@ pub fn list(timeout: Duration) -> Vec<Live> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let Ok(child) = cmd.spawn() else { return Vec::new() };
-
-    // Bound OUR WAIT, not the child's life. Killing it would need a platform
-    // handle we deliberately do not depend on, and it does not matter here: the
-    // query is short-lived and read-only, holds no lock and owns no terminal, so
-    // a straggler costs nothing while the caller carries on. Reading the pipe in
-    // the same thread as the wait is what avoids the classic deadlock of a child
-    // blocked on a full pipe buffer.
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output().ok());
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(Some(out)) => parse(&String::from_utf8_lossy(&out.stdout)),
+    match crate::process::output(&mut cmd, timeout, 4 << 20) {
+        Ok(out) if out.status.success() => parse(&String::from_utf8_lossy(&out.stdout)),
         _ => Vec::new(),
     }
 }
